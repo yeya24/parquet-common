@@ -41,5 +41,3 @@ Expect:
 
 Ideas, feedback, and code contributions are welcome — but please note that the design is still in flux. If you're interested in contributing, feel free to open an issue or discussion.
 📄 License
-
-Apache 2.0
