@@ -28,7 +28,7 @@ type Builder struct {
 	mint, maxt        int64
 }
 
-func NewBuilder(mint, maxt int64, colDuration int64) *Builder {
+func NewBuilder(mint, maxt, colDuration int64) *Builder {
 	b := &Builder{
 		g:                 make(parquet.Group),
 		dataColDurationMs: colDuration,

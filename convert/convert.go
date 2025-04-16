@@ -146,7 +146,6 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, sortedLabels .
 	}
 	if err := p.Err(); err != nil {
 		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
-
 	}
 
 	slices.SortFunc(series, func(a, b s) int {
