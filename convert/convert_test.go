@@ -178,20 +178,21 @@ func Test_SortedLabels(t *testing.T) {
 
 	// Some very random series
 	for i := 0; i < 240; i++ {
-		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()), "foo", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()), "foo", fmt.Sprintf("%v", rand.Int31()), "zzz", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
 		require.NoError(t, err)
 	}
 
 	// Less random series making sure some metric names have more than 1 foo value
 	for i := 0; i < 240; i++ {
-		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20), "foo", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20), "foo", fmt.Sprintf("%v", rand.Int31()), "zzz", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
 		require.NoError(t, err)
 	}
 
 	require.NoError(t, app.Commit())
 
 	h := st.Head()
-	rr, err := newTsdbRowReader(ctx, 0, time.Minute.Milliseconds(), (time.Minute * 10).Milliseconds(), []Convertible{h}, labels.MetricName, "foo")
+	// lets sort first by `zzz` as its not the default sorting on TSDB
+	rr, err := newTsdbRowReader(ctx, 0, time.Minute.Milliseconds(), (time.Minute * 10).Milliseconds(), []Convertible{h}, "zzz", labels.MetricName)
 	require.NoError(t, err)
 
 	buf := make([]parquet.Row, h.NumSeries())
@@ -203,9 +204,9 @@ func Test_SortedLabels(t *testing.T) {
 	require.Len(t, series, n)
 
 	for i := 0; i < len(series)-1; i++ {
-		require.LessOrEqual(t, series[i].Get(labels.MetricName), series[i+1].Get(labels.MetricName))
-		if series[i].Get(labels.MetricName) == series[i+1].Get(labels.MetricName) {
-			require.LessOrEqual(t, series[i].Get("foo"), series[i+1].Get("foo"))
+		require.LessOrEqual(t, series[i].Get("zzz"), series[i+1].Get("zzz"))
+		if series[i].Get("zzz") == series[i+1].Get("zzz") {
+			require.LessOrEqual(t, series[i].Get(labels.MetricName), series[i+1].Get(labels.MetricName))
 		}
 	}
 }

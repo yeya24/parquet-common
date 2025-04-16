@@ -133,7 +133,6 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, sortedLabels .
 	}
 	series := make([]s, 0, 128)
 
-	// Fetch all the series only once.
 	lb := labels.NewScratchBuilder(10)
 	for p.Next() {
 		lb.Reset()
@@ -142,7 +141,7 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, sortedLabels .
 			return index.ErrPostings(fmt.Errorf("expand series: %w", err))
 		}
 
-		series = append(series, s{labels: lb.Labels(), ref: p.At()})
+		series = append(series, s{labels: lb.Labels().MatchLabels(true, sortedLabels...), ref: p.At()})
 	}
 	if err := p.Err(); err != nil {
 		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
