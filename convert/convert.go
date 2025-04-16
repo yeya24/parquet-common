@@ -3,9 +3,6 @@ package convert
 import (
 	"context"
 	"fmt"
-	"io"
-	"time"
-
 	"github.com/hashicorp/go-multierror"
 	"github.com/parquet-go/parquet-go"
 	"github.com/prometheus-community/parquet-common/schema"
@@ -14,6 +11,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
+	"io"
 )
 
 type Convertible interface {
@@ -36,13 +34,13 @@ type tsdbRowReader struct {
 	encoder *schema.PrometheusParquetChunksEncoder
 }
 
-func newTsdbRowReader(ctx context.Context, mint, maxt int64, dataColDurationMs time.Duration, blks []Convertible) (*tsdbRowReader, error) {
+func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible) (*tsdbRowReader, error) {
 	var (
 		seriesSets = make([]storage.ChunkSeriesSet, 0, len(blks))
 		closers    = make([]io.Closer, 0, len(blks))
 	)
 
-	b := schema.NewBuilder(mint, maxt, dataColDurationMs)
+	b := schema.NewBuilder(mint, maxt, colDuration)
 
 	for _, blk := range blks {
 		indexr, err := blk.Index()
@@ -72,7 +70,7 @@ func newTsdbRowReader(ctx context.Context, mint, maxt int64, dataColDurationMs t
 		seriesSet := tsdb.NewBlockChunkSeriesSet(blk.Meta().ULID, indexr, chunkr, tombsr, postings, mint, maxt, false)
 		seriesSets = append(seriesSets, seriesSet)
 
-		b.AddLabelNameColumn(lblns)
+		b.AddLabelNameColumn(lblns...)
 	}
 
 	cseriesSet := storage.NewMergeChunkSeriesSet(seriesSets, 0, storage.NewConcatenatingChunkSeriesMerger())

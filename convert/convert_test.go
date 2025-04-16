@@ -75,7 +75,7 @@ func Test_Convert_TSDB(t *testing.T) {
 			require.NoError(t, app.Commit())
 
 			h := st.DB.Head()
-			rr, err := newTsdbRowReader(ctx, h.MinTime(), h.MaxTime(), tt.dataColDurationMs, []Convertible{h})
+			rr, err := newTsdbRowReader(ctx, h.MinTime(), h.MaxTime(), tt.dataColDurationMs.Milliseconds(), []Convertible{h})
 			require.NoError(t, err)
 
 			defer func() { _ = rr.Close() }()
@@ -129,7 +129,7 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 
 	h := st.DB.Head()
 	mint, maxt := (time.Minute * 30).Milliseconds(), (time.Minute*90).Milliseconds()-1
-	rr, err := newTsdbRowReader(ctx, mint, maxt, time.Minute*10, []Convertible{h})
+	rr, err := newTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h})
 	require.NoError(t, err)
 	defer func() { _ = rr.Close() }()
 	// 6 data cols with 10 min duration

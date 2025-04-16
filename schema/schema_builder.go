@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/parquet-go/parquet-go"
 	"strconv"
-	"time"
 )
 
 type Builder struct {
@@ -15,12 +14,12 @@ type Builder struct {
 	mint, maxt        int64
 }
 
-func NewBuilder(mint, maxt int64, dataColDuration time.Duration) *Builder {
+func NewBuilder(mint, maxt int64, colDuration int64) *Builder {
 	b := &Builder{
 		g:                 make(parquet.Group),
-		dataColDurationMs: dataColDuration.Milliseconds(),
+		dataColDurationMs: colDuration,
 		metadata: map[string]string{
-			DataColSizeMd: strconv.FormatInt(dataColDuration.Milliseconds(), 10),
+			DataColSizeMd: strconv.FormatInt(colDuration, 10),
 		},
 		mint: mint,
 		maxt: maxt,
@@ -29,7 +28,7 @@ func NewBuilder(mint, maxt int64, dataColDuration time.Duration) *Builder {
 	return b
 }
 
-func (b *Builder) AddLabelNameColumn(lbls []string) {
+func (b *Builder) AddLabelNameColumn(lbls ...string) {
 	for _, lbl := range lbls {
 		b.g[LabelToColumn(lbl)] = parquet.Optional(parquet.Encoded(parquet.String(), &parquet.RLEDictionary))
 	}
