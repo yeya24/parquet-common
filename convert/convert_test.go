@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -168,6 +169,47 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	require.Equal(t, 120, totalSamples)
 }
 
+func Test_SortedLabels(t *testing.T) {
+	ctx := context.Background()
+	st := teststorage.New(t)
+	t.Cleanup(func() { _ = st.Close() })
+
+	app := st.Appender(ctx)
+
+	// Some very random series
+	for i := 0; i < 240; i++ {
+		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()), "foo", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		require.NoError(t, err)
+	}
+
+	// Less random series making sure some metric names have more than 1 foo value
+	for i := 0; i < 240; i++ {
+		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20), "foo", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, app.Commit())
+
+	h := st.Head()
+	rr, err := newTsdbRowReader(ctx, 0, time.Minute.Milliseconds(), (time.Minute * 10).Milliseconds(), []Convertible{h}, labels.MetricName, "foo")
+	require.NoError(t, err)
+
+	buf := make([]parquet.Row, h.NumSeries())
+	n, _ := rr.ReadRows(buf)
+	require.Equal(t, h.NumSeries(), uint64(n))
+
+	series, _, err := rowToSeries(rr.schema, nil, buf[:n])
+	require.NoError(t, err)
+	require.Len(t, series, n)
+
+	for i := 0; i < len(series)-1; i++ {
+		require.LessOrEqual(t, series[i].Get(labels.MetricName), series[i+1].Get(labels.MetricName))
+		if series[i].Get(labels.MetricName) == series[i+1].Get(labels.MetricName) {
+			require.LessOrEqual(t, series[i].Get("foo"), series[i+1].Get("foo"))
+		}
+	}
+}
+
 func rowToSeries(s *schema.TSDBSchema, dec *schema.PrometheusParquetChunksDecoder, rows []parquet.Row) ([]labels.Labels, [][]chunks.Meta, error) {
 	cols := s.Schema.Columns()
 	b := labels.NewScratchBuilder(10)
@@ -183,7 +225,7 @@ func rowToSeries(s *schema.TSDBSchema, dec *schema.PrometheusParquetChunksDecode
 				b.Add(label, colVal.String())
 			}
 
-			if schema.IsDataColumn(col) {
+			if schema.IsDataColumn(col) && dec != nil {
 				c, err := dec.Decode(colVal.ByteArray(), 0, math.MaxInt64)
 				if err != nil {
 					return nil, nil, err
