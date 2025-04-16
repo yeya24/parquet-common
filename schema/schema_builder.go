@@ -3,7 +3,6 @@ package schema
 import (
 	"fmt"
 	"github.com/parquet-go/parquet-go"
-	"math"
 	"strconv"
 	"time"
 )
@@ -13,25 +12,21 @@ type Builder struct {
 
 	metadata          map[string]string
 	dataColDurationMs int64
-	minTs, maxTs      int64
+	mint, maxt        int64
 }
 
-func NewBuilder(dataColDuration time.Duration) *Builder {
+func NewBuilder(mint, maxt int64, dataColDuration time.Duration) *Builder {
 	b := &Builder{
 		g:                 make(parquet.Group),
 		dataColDurationMs: dataColDuration.Milliseconds(),
 		metadata: map[string]string{
 			DataColSizeMd: strconv.FormatInt(dataColDuration.Milliseconds(), 10),
 		},
-		minTs: math.MaxInt64,
+		mint: mint,
+		maxt: maxt,
 	}
 
 	return b
-}
-
-func (b *Builder) TrackMinMax(minTs, maxTs int64) {
-	b.minTs = min(b.minTs, minTs)
-	b.maxTs = max(b.maxTs, maxTs)
 }
 
 func (b *Builder) AddLabelNameColumn(lbls []string) {
@@ -42,7 +37,7 @@ func (b *Builder) AddLabelNameColumn(lbls []string) {
 
 func (b *Builder) Build() (*TSDBSchema, error) {
 	colIdx := 0
-	for i := b.minTs; i <= b.maxTs; i += b.dataColDurationMs {
+	for i := b.mint; i <= b.maxt; i += b.dataColDurationMs {
 		b.g[DataColumn(colIdx)] = parquet.Encoded(parquet.Leaf(parquet.ByteArrayType), &parquet.DeltaLengthByteArray)
 		colIdx++
 	}
@@ -63,8 +58,8 @@ func (b *Builder) Build() (*TSDBSchema, error) {
 		Metadata:          b.metadata,
 		DataColDurationMs: b.dataColDurationMs,
 		DataColsIndexes:   dc,
-		MinTs:             b.minTs,
-		MaxTs:             b.maxTs,
+		MinTs:             b.mint,
+		MaxTs:             b.maxt,
 	}, nil
 }
 

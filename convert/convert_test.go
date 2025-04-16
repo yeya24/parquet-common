@@ -62,13 +62,12 @@ func Test_Convert_TSDB(t *testing.T) {
 			t.Cleanup(func() { st.Close() })
 
 			app := st.Appender(ctx)
-			now := time.Now()
 			seriesHash := make(map[uint64]struct{})
 			for i := 0; i != 1_000; i++ {
 				for j := 0; j < tt.numberOfSamples; j++ {
 					lbls := labels.FromStrings("__name__", "foo", "bar", fmt.Sprintf("%d", 2*i))
 					seriesHash[lbls.Hash()] = struct{}{}
-					_, err := app.Append(0, lbls, TimeToMilliseconds(now.Add(tt.step*time.Duration(j))), float64(i))
+					_, err := app.Append(0, lbls, (tt.step * time.Duration(j)).Milliseconds(), float64(i))
 					require.NoError(t, err)
 				}
 			}
@@ -76,7 +75,7 @@ func Test_Convert_TSDB(t *testing.T) {
 			require.NoError(t, app.Commit())
 
 			h := st.DB.Head()
-			rr, err := newTsdbRowReader(ctx, tt.dataColDurationMs, []Convertible{h})
+			rr, err := newTsdbRowReader(ctx, h.MinTime(), h.MaxTime(), tt.dataColDurationMs, []Convertible{h})
 			require.NoError(t, err)
 
 			defer func() { _ = rr.Close() }()
@@ -112,22 +111,48 @@ func Test_Convert_TSDB(t *testing.T) {
 	}
 }
 
-// TimeToMilliseconds returns the input time as milliseconds, using the same
-// formula used by Prometheus in order to get the same timestamp when asserting
-// on query results. The formula we're mimicking here is Prometheus parseTime().
-// See: https://github.com/prometheus/prometheus/blob/df80dc4d3970121f2f76cba79050983ffb3cdbb0/web/api/v1/api.go#L1690-L1694
-func TimeToMilliseconds(t time.Time) int64 {
-	// Convert to seconds.
-	sec := float64(t.Unix()) + float64(t.Nanosecond())/1e9
+func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
+	ctx := context.Background()
+	st := teststorage.New(t)
+	t.Cleanup(func() { st.Close() })
 
-	// Parse seconds.
-	s, ns := math.Modf(sec)
+	app := st.Appender(ctx)
 
-	// Round nanoseconds part.
-	ns = math.Round(ns*1000) / 1000
+	// 240 samples * 30 seconds = 2 hours
+	step := (30 * time.Second).Milliseconds()
+	for i := 0; i < 240; i++ {
+		_, err := app.Append(0, labels.FromStrings("__name__", "foo"), int64(i)*step, float64(i))
+		require.NoError(t, err)
+	}
 
-	// Convert to millis.
-	return (int64(s) * 1e3) + (int64(ns * 1e3))
+	require.NoError(t, app.Commit())
+
+	h := st.DB.Head()
+	mint, maxt := (time.Minute * 30).Milliseconds(), (time.Minute*90).Milliseconds()-1
+	rr, err := newTsdbRowReader(ctx, mint, maxt, time.Minute*10, []Convertible{h})
+	require.NoError(t, err)
+	defer func() { _ = rr.Close() }()
+	// 6 data cols with 10 min duration
+	require.Len(t, rr.schema.DataColsIndexes, 6)
+
+	chunksDecoder := schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool())
+	buf := make([]parquet.Row, 100)
+	n, _ := rr.ReadRows(buf)
+	require.Equal(t, 1, n)
+
+	series, chunks, err := rowToSeries(rr.schema, chunksDecoder, buf[:n])
+	require.NoError(t, err)
+	require.Len(t, series, 1)
+	require.Len(t, chunks, 1)
+	require.Equal(t, labels.FromStrings("__name__", "foo").Hash(), series[0].Hash())
+
+	totalSamples := 0
+	for _, c := range chunks[0] {
+		totalSamples += c.Chunk.NumSamples()
+		require.LessOrEqual(t, c.MaxTime, maxt)
+		require.GreaterOrEqual(t, c.MinTime, mint)
+	}
+	require.Equal(t, 120, totalSamples)
 }
 
 func rowToSeries(s *schema.TSDBSchema, dec *schema.PrometheusParquetChunksDecoder, rows []parquet.Row) ([]labels.Labels, [][]chunks.Meta, error) {

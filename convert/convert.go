@@ -36,13 +36,13 @@ type tsdbRowReader struct {
 	encoder *schema.PrometheusParquetChunksEncoder
 }
 
-func newTsdbRowReader(ctx context.Context, dataColDurationMs time.Duration, blks []Convertible) (*tsdbRowReader, error) {
+func newTsdbRowReader(ctx context.Context, mint, maxt int64, dataColDurationMs time.Duration, blks []Convertible) (*tsdbRowReader, error) {
 	var (
 		seriesSets = make([]storage.ChunkSeriesSet, 0, len(blks))
 		closers    = make([]io.Closer, 0, len(blks))
 	)
 
-	b := schema.NewBuilder(dataColDurationMs)
+	b := schema.NewBuilder(mint, maxt, dataColDurationMs)
 
 	for _, blk := range blks {
 		indexr, err := blk.Index()
@@ -69,11 +69,10 @@ func newTsdbRowReader(ctx context.Context, dataColDurationMs time.Duration, blks
 		}
 
 		postings := tsdb.AllSortedPostings(ctx, indexr)
-		seriesSet := tsdb.NewBlockChunkSeriesSet(blk.Meta().ULID, indexr, chunkr, tombsr, postings, blk.Meta().MinTime, blk.Meta().MaxTime, false)
+		seriesSet := tsdb.NewBlockChunkSeriesSet(blk.Meta().ULID, indexr, chunkr, tombsr, postings, mint, maxt, false)
 		seriesSets = append(seriesSets, seriesSet)
 
 		b.AddLabelNameColumn(lblns)
-		b.TrackMinMax(blk.Meta().MinTime, blk.Meta().MaxTime)
 	}
 
 	cseriesSet := storage.NewMergeChunkSeriesSet(seriesSets, 0, storage.NewConcatenatingChunkSeriesMerger())
