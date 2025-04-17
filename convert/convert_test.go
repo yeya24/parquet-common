@@ -179,16 +179,43 @@ func Test_SortedLabels(t *testing.T) {
 	app := st.Appender(ctx)
 	app2 := st2.Appender(ctx)
 
+	totalSeries := 0
 	// Some very random series
 	for i := 0; i < 240; i++ {
-		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()), "foo", fmt.Sprintf("%v", rand.Int31()), "zzz", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		_, err := app.Append(0, labels.FromStrings(
+			labels.MetricName, fmt.Sprintf("%v", rand.Int31()),
+			"type", "app",
+			"zzz", fmt.Sprintf("%v", rand.Int31()),
+			"i", fmt.Sprintf("%v", i),
+		), 10, float64(i))
 		require.NoError(t, err)
+		totalSeries++
 	}
 
 	// Less random series making sure some metric names have more than 1 foo value
 	for i := 0; i < 240; i++ {
-		_, err := app2.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20), "foo", fmt.Sprintf("%v", rand.Int31()), "zzz", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		_, err := app2.Append(0, labels.FromStrings(
+			labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20),
+			"type", "app2",
+			"zzz", fmt.Sprintf("%v", rand.Int31()),
+			"i", fmt.Sprintf("%v", i),
+		), 10, float64(i))
 		require.NoError(t, err)
+		totalSeries++
+	}
+
+	// Lets create some common series on both blocks
+	for i := 0; i < 240; i++ {
+		lbls := labels.FromStrings(
+			labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20),
+			"type", "duplicated",
+			"zzz", fmt.Sprintf("%v", rand.Int31()),
+			"i", fmt.Sprintf("%v", i),
+		)
+		_, err := app.Append(0, lbls, 10, float64(i))
+		require.NoError(t, err)
+		_, err = app2.Append(0, lbls, 11, float64(i+1))
+		totalSeries++
 	}
 
 	require.NoError(t, app.Commit())
@@ -202,9 +229,9 @@ func Test_SortedLabels(t *testing.T) {
 
 	buf := make([]parquet.Row, h.NumSeries()+h2.NumSeries())
 	n, _ := rr.ReadRows(buf)
-	require.Equal(t, h.NumSeries()+h2.NumSeries(), uint64(n))
+	require.Equal(t, totalSeries, n)
 
-	series, _, err := rowToSeries(rr.schema, nil, buf[:n])
+	series, chunks, err := rowToSeries(rr.schema, schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool()), buf[:n])
 	require.NoError(t, err)
 	require.Len(t, series, n)
 
@@ -213,6 +240,21 @@ func Test_SortedLabels(t *testing.T) {
 		if series[i].Get("zzz") == series[i+1].Get("zzz") {
 			require.LessOrEqual(t, series[i].Get(labels.MetricName), series[i+1].Get(labels.MetricName))
 		}
+		require.Len(t, chunks[i], 1)
+		st := chunks[i][0].Chunk.Iterator(nil)
+		expectedSamples := 1
+		if series[i].Get("type") == "duplicated" {
+			expectedSamples++
+		}
+		totalSamples := 0
+
+		for st.Next() != chunkenc.ValNone {
+			totalSamples++
+		}
+
+		require.Equal(t, expectedSamples, totalSamples)
+
+		require.NoError(t, st.Err())
 	}
 }
 
