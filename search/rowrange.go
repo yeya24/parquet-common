@@ -25,7 +25,7 @@ type rowRange struct {
 // intersect intersects the row ranges from left hand sight with the row ranges from rhs
 // it assumes that lhs and rhs are simplified and returns a simplified result.
 // it operates in o(l+r) time by cursoring through ranges with a two pointer approach.
-func intersectRowRanges(lhs []rowRange, rhs []rowRange) []rowRange {
+func intersectRowRanges(lhs, rhs []rowRange) []rowRange {
 	res := make([]rowRange, 0)
 	for l, r := 0, 0; l < len(lhs) && r < len(rhs); {
 		al, bl := lhs[l].from, lhs[l].from+lhs[l].count

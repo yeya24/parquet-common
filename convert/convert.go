@@ -17,6 +17,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/parquet-go/parquet-go"
@@ -25,6 +27,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 )
 
@@ -48,13 +51,23 @@ type tsdbRowReader struct {
 	encoder *schema.PrometheusParquetChunksEncoder
 }
 
-func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible) (*tsdbRowReader, error) {
+func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible, sortedLabels ...string) (*tsdbRowReader, error) {
 	var (
 		seriesSets = make([]storage.ChunkSeriesSet, 0, len(blks))
 		closers    = make([]io.Closer, 0, len(blks))
 	)
 
 	b := schema.NewBuilder(mint, maxt, colDuration)
+
+	compareFunc := func(a, b labels.Labels) int {
+		for _, lb := range sortedLabels {
+			if c := strings.Compare(a.Get(lb), b.Get(lb)); c != 0 {
+				return c
+			}
+		}
+
+		return 0
+	}
 
 	for _, blk := range blks {
 		indexr, err := blk.Index()
@@ -80,14 +93,14 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 			return nil, fmt.Errorf("unable to get label names from block: %s", err)
 		}
 
-		postings := tsdb.AllSortedPostings(ctx, indexr)
+		postings := sortedPostings(ctx, indexr, compareFunc, sortedLabels...)
 		seriesSet := tsdb.NewBlockChunkSeriesSet(blk.Meta().ULID, indexr, chunkr, tombsr, postings, mint, maxt, false)
 		seriesSets = append(seriesSets, seriesSet)
 
 		b.AddLabelNameColumn(lblns...)
 	}
 
-	cseriesSet := storage.NewMergeChunkSeriesSet(seriesSets, 0, storage.NewConcatenatingChunkSeriesMerger())
+	cseriesSet := NewMergeChunkSeriesSet(seriesSets, compareFunc, storage.NewConcatenatingChunkSeriesMerger())
 
 	s, err := b.Build()
 	if err != nil {
@@ -115,6 +128,43 @@ func (rr *tsdbRowReader) Close() error {
 
 func (rr *tsdbRowReader) Schema() *parquet.Schema {
 	return rr.schema.Schema
+}
+
+func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a, b labels.Labels) int, sortedLabels ...string) index.Postings {
+	p := tsdb.AllSortedPostings(ctx, indexr)
+
+	if len(sortedLabels) == 0 {
+		return p
+	}
+
+	type s struct {
+		ref    storage.SeriesRef
+		labels labels.Labels
+	}
+	series := make([]s, 0, 128)
+
+	lb := labels.NewScratchBuilder(10)
+	for p.Next() {
+		lb.Reset()
+		err := indexr.Series(p.At(), &lb, nil)
+		if err != nil {
+			return index.ErrPostings(fmt.Errorf("expand series: %w", err))
+		}
+
+		series = append(series, s{labels: lb.Labels().MatchLabels(true, sortedLabels...), ref: p.At()})
+	}
+	if err := p.Err(); err != nil {
+		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
+	}
+
+	slices.SortFunc(series, func(a, b s) int { return compare(a.labels, b.labels) })
+
+	// Convert back to list.
+	ep := make([]storage.SeriesRef, 0, len(series))
+	for _, p := range series {
+		ep = append(ep, p.ref)
+	}
+	return index.NewListPostings(ep)
 }
 
 func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
