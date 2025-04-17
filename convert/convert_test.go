@@ -173,8 +173,11 @@ func Test_SortedLabels(t *testing.T) {
 	ctx := context.Background()
 	st := teststorage.New(t)
 	t.Cleanup(func() { _ = st.Close() })
+	st2 := teststorage.New(t)
+	t.Cleanup(func() { _ = st2.Close() })
 
 	app := st.Appender(ctx)
+	app2 := st2.Appender(ctx)
 
 	// Some very random series
 	for i := 0; i < 240; i++ {
@@ -184,20 +187,22 @@ func Test_SortedLabels(t *testing.T) {
 
 	// Less random series making sure some metric names have more than 1 foo value
 	for i := 0; i < 240; i++ {
-		_, err := app.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20), "foo", fmt.Sprintf("%v", rand.Int31()), "zzz", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
+		_, err := app2.Append(0, labels.FromStrings(labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20), "foo", fmt.Sprintf("%v", rand.Int31()), "zzz", fmt.Sprintf("%v", rand.Int31())), 10, float64(i))
 		require.NoError(t, err)
 	}
 
 	require.NoError(t, app.Commit())
+	require.NoError(t, app2.Commit())
 
 	h := st.Head()
+	h2 := st2.Head()
 	// lets sort first by `zzz` as its not the default sorting on TSDB
-	rr, err := newTsdbRowReader(ctx, 0, time.Minute.Milliseconds(), (time.Minute * 10).Milliseconds(), []Convertible{h}, "zzz", labels.MetricName)
+	rr, err := newTsdbRowReader(ctx, 0, time.Minute.Milliseconds(), (time.Minute * 10).Milliseconds(), []Convertible{h, h2}, "zzz", labels.MetricName)
 	require.NoError(t, err)
 
-	buf := make([]parquet.Row, h.NumSeries())
+	buf := make([]parquet.Row, h.NumSeries()+h2.NumSeries())
 	n, _ := rr.ReadRows(buf)
-	require.Equal(t, h.NumSeries(), uint64(n))
+	require.Equal(t, h.NumSeries()+h2.NumSeries(), uint64(n))
 
 	series, _, err := rowToSeries(rr.schema, nil, buf[:n])
 	require.NoError(t, err)

@@ -59,6 +59,16 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 
 	b := schema.NewBuilder(mint, maxt, colDuration)
 
+	compareFunc := func(a, b labels.Labels) int {
+		for _, lb := range sortedLabels {
+			if c := strings.Compare(a.Get(lb), b.Get(lb)); c != 0 {
+				return c
+			}
+		}
+
+		return 0
+	}
+
 	for _, blk := range blks {
 		indexr, err := blk.Index()
 		if err != nil {
@@ -83,14 +93,17 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 			return nil, fmt.Errorf("unable to get label names from block: %s", err)
 		}
 
-		postings := sortedPostings(ctx, indexr, sortedLabels...)
+		postings := sortedPostings(ctx, indexr, compareFunc, sortedLabels...)
 		seriesSet := tsdb.NewBlockChunkSeriesSet(blk.Meta().ULID, indexr, chunkr, tombsr, postings, mint, maxt, false)
 		seriesSets = append(seriesSets, seriesSet)
 
 		b.AddLabelNameColumn(lblns...)
 	}
 
-	cseriesSet := storage.NewMergeChunkSeriesSet(seriesSets, 0, storage.NewConcatenatingChunkSeriesMerger())
+	cseriesSet, err := NewMergeChunkSeriesSet(seriesSets, compareFunc, storage.NewConcatenatingChunkSeriesMerger())
+	if err != nil {
+		return nil, fmt.Errorf("unable to create MergeChunkSeriesSet: %s", err)
+	}
 
 	s, err := b.Build()
 	if err != nil {
@@ -120,7 +133,7 @@ func (rr *tsdbRowReader) Schema() *parquet.Schema {
 	return rr.schema.Schema
 }
 
-func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, sortedLabels ...string) index.Postings {
+func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a, b labels.Labels) int, sortedLabels ...string) index.Postings {
 	p := tsdb.AllSortedPostings(ctx, indexr)
 
 	if len(sortedLabels) == 0 {
@@ -147,14 +160,7 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, sortedLabels .
 		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
 	}
 
-	slices.SortFunc(series, func(a, b s) int {
-		for _, lb := range sortedLabels {
-			if c := strings.Compare(a.labels.Get(lb), b.labels.Get(lb)); c != 0 {
-				return c
-			}
-		}
-		return 0
-	})
+	slices.SortFunc(series, func(a, b s) int { return compare(a.labels, b.labels) })
 
 	// Convert back to list.
 	ep := make([]storage.SeriesRef, 0, len(series))
