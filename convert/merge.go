@@ -21,7 +21,7 @@ import (
 	"github.com/prometheus/prometheus/util/annotations"
 )
 
-func NewMergeChunkSeriesSet(sets []storage.ChunkSeriesSet, compare func(a, b labels.Labels) int, mergeFunc storage.VerticalChunkSeriesMergeFunc) (storage.ChunkSeriesSet, error) {
+func NewMergeChunkSeriesSet(sets []storage.ChunkSeriesSet, compare func(a, b labels.Labels) int, mergeFunc storage.VerticalChunkSeriesMergeFunc) storage.ChunkSeriesSet {
 	h := heapChunkSeries{
 		heap:    make([]storage.ChunkSeriesSet, 0, len(sets)),
 		compare: compare,
@@ -34,13 +34,14 @@ func NewMergeChunkSeriesSet(sets []storage.ChunkSeriesSet, compare func(a, b lab
 			heap.Push(&h, set)
 		}
 		if err := set.Err(); err != nil {
-			return nil, err
+			return &mergeChunkSeriesSet{err: err}
 		}
 	}
+
 	return &mergeChunkSeriesSet{
 		h:         h,
 		mergeFunc: mergeFunc,
-	}, nil
+	}
 }
 
 type mergeChunkSeriesSet struct {

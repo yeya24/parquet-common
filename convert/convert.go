@@ -100,10 +100,7 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 		b.AddLabelNameColumn(lblns...)
 	}
 
-	cseriesSet, err := NewMergeChunkSeriesSet(seriesSets, compareFunc, storage.NewConcatenatingChunkSeriesMerger())
-	if err != nil {
-		return nil, fmt.Errorf("unable to create MergeChunkSeriesSet: %s", err)
-	}
+	cseriesSet := NewMergeChunkSeriesSet(seriesSets, compareFunc, storage.NewConcatenatingChunkSeriesMerger())
 
 	s, err := b.Build()
 	if err != nil {
