@@ -215,6 +215,7 @@ func Test_SortedLabels(t *testing.T) {
 		_, err := app.Append(0, lbls, 10, float64(i))
 		require.NoError(t, err)
 		_, err = app2.Append(0, lbls, 11, float64(i+1))
+		require.NoError(t, err)
 		totalSeries++
 	}
 
