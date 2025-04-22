@@ -34,6 +34,8 @@ func NewBuilder(mint, maxt, colDuration int64) *Builder {
 		dataColDurationMs: colDuration,
 		metadata: map[string]string{
 			DataColSizeMd: strconv.FormatInt(colDuration, 10),
+			MaxTMd:        strconv.FormatInt(maxt, 10),
+			MinTMd:        strconv.FormatInt(mint, 10),
 		},
 		mint: mint,
 		maxt: maxt,

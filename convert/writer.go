@@ -75,7 +75,7 @@ func (c *ShardedWriter) convertShards(ctx context.Context) error {
 func (c *ShardedWriter) convertShard(ctx context.Context) (bool, error) {
 	rowsToWrite := c.numRowGroups * c.rowGroupSize
 
-	n, err := c.writeFile(ctx, c.s.Schema, rowsToWrite)
+	n, err := c.writeFile(ctx, c.s, rowsToWrite)
 	if err != nil {
 		return false, err
 	}
@@ -89,10 +89,11 @@ func (c *ShardedWriter) convertShard(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func (c *ShardedWriter) writeFile(ctx context.Context, inSchema *parquet.Schema, rowsToWrite int) (int64, error) {
+func (c *ShardedWriter) writeFile(ctx context.Context, schema *schema.TSDBSchema, rowsToWrite int) (int64, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	writer, err := newSplitFileWriter(ctx, c.bkt, inSchema, c.transformations(),
+
+	fileOpts := []parquet.WriterOption{
 		parquet.SortingWriterConfig(
 			parquet.SortingColumns(c.ops.buildSortingColumns()...),
 		),
@@ -100,6 +101,14 @@ func (c *ShardedWriter) writeFile(ctx context.Context, inSchema *parquet.Schema,
 		parquet.BloomFilters(c.ops.buildBloomfilterColumns()...),
 		parquet.PageBufferSize(c.ops.pageBufferSize),
 		parquet.WriteBufferSize(c.ops.writeBufferSize),
+	}
+
+	for k, v := range schema.Metadata {
+		fileOpts = append(fileOpts, parquet.KeyValueMetadata(k, v))
+	}
+
+	writer, err := newSplitFileWriter(ctx, c.bkt, schema.Schema, c.transformations(),
+		fileOpts...,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("unable to create row writer: %s", err)

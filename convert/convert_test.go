@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
@@ -146,7 +147,8 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	h := st.Head()
 	mint, maxt := (time.Minute * 30).Milliseconds(), (time.Minute*90).Milliseconds()-1
 
-	shards, err := ConvertTSDBBlock(ctx, bkt, mint, maxt, []Convertible{h}, WithColDuration(time.Minute*10), WithSortBy(labels.MetricName))
+	datColDuration := time.Minute * 10
+	shards, err := ConvertTSDBBlock(ctx, bkt, mint, maxt, []Convertible{h}, WithColDuration(datColDuration), WithSortBy(labels.MetricName))
 	require.NoError(t, err)
 	require.Equal(t, 1, shards)
 
@@ -154,6 +156,13 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	chunksFileName := schema.ChunksPfileNameForShard(DefaultConvertOpts.name, 0)
 	lf, cf, err := openParquetFiles(ctx, bkt, labelsFileName, chunksFileName)
 	require.NoError(t, err)
+
+	// Check metadatas
+	for _, file := range []*parquet.File{lf, cf} {
+		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.MinTMd], strconv.FormatInt(mint, 10))
+		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.MaxTMd], strconv.FormatInt(maxt, 10))
+		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.DataColSizeMd], strconv.FormatInt(datColDuration.Milliseconds(), 10))
+	}
 
 	// 6 data cols with 10 min duration
 	require.Len(t, cf.Schema().Columns(), 6)

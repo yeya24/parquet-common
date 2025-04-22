@@ -19,6 +19,7 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/parquet-go/parquet-go/compress/zstd"
+	"github.com/parquet-go/parquet-go/format"
 )
 
 const (
@@ -26,6 +27,8 @@ const (
 	DataColumnPrefix  = "s_data_"
 
 	DataColSizeMd = "data_col_duration_ms"
+	MinTMd        = "minT"
+	MaxTMd        = "maxT"
 )
 
 func LabelToColumn(lbl string) string {
@@ -65,4 +68,12 @@ func WithCompression(s *parquet.Schema) *parquet.Schema {
 	}
 
 	return parquet.NewSchema("uncompressed", g)
+}
+
+func MetadataToMap(md []format.KeyValue) map[string]string {
+	r := make(map[string]string, len(md))
+	for _, kv := range md {
+		r[kv.Key] = kv.Value
+	}
+	return r
 }
