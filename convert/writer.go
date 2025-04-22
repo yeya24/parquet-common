@@ -25,21 +25,19 @@ type ShardedWriter struct {
 	s   *schema.TSDBSchema
 	bkt objstore.Bucket
 
-	sortingColumns     []parquet.SortingColumn
-	bloomfilterColumns []parquet.BloomFilterColumn
+	ops *convertOpts
 }
 
 func NewShardedWrite(rr parquet.RowReader, s *schema.TSDBSchema, bkt objstore.Bucket, ops *convertOpts) *ShardedWriter {
 	return &ShardedWriter{
-		name:               ops.name,
-		rowGroupSize:       ops.rowGroupSize,
-		numRowGroups:       ops.numRowGroups,
-		currentShard:       0,
-		rr:                 rr,
-		s:                  s,
-		bkt:                bkt,
-		sortingColumns:     ops.buildSortingColumns(),
-		bloomfilterColumns: ops.buildBloomfilterColumns(),
+		name:         ops.name,
+		rowGroupSize: ops.rowGroupSize,
+		numRowGroups: ops.numRowGroups,
+		currentShard: 0,
+		rr:           rr,
+		s:            s,
+		bkt:          bkt,
+		ops:          ops,
 	}
 }
 
@@ -83,10 +81,12 @@ func (c *ShardedWriter) writeFile(ctx context.Context, inSchema *parquet.Schema,
 	defer cancel()
 	writer, err := newSplitFileWriter(ctx, c.bkt, inSchema, c.transformations(),
 		parquet.SortingWriterConfig(
-			parquet.SortingColumns(c.sortingColumns...),
+			parquet.SortingColumns(c.ops.buildSortingColumns()...),
 		),
 		parquet.MaxRowsPerRowGroup(int64(c.rowGroupSize)),
-		parquet.BloomFilters(c.bloomfilterColumns...),
+		parquet.BloomFilters(c.ops.buildBloomfilterColumns()...),
+		parquet.PageBufferSize(c.ops.pageBufferSize),
+		parquet.WriteBufferSize(c.ops.writeBufferSize),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("unable to create row writer: %s", err)

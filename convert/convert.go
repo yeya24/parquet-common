@@ -42,6 +42,8 @@ var DefaultConvertOpts = convertOpts{
 	numRowGroups:      math.MaxInt32,
 	sortedLabels:      []string{labels.MetricName},
 	bloomfilterLabels: []string{labels.MetricName},
+	pageBufferSize:    parquet.DefaultPageBufferSize,
+	writeBufferSize:   parquet.DefaultWriteBufferSize,
 }
 
 type Convertible interface {
@@ -58,6 +60,8 @@ type convertOpts struct {
 	name              string
 	sortedLabels      []string
 	bloomfilterLabels []string
+	pageBufferSize    int
+	writeBufferSize   int
 }
 
 func (cfg convertOpts) buildBloomfilterColumns() []parquet.BloomFilterColumn {
@@ -81,15 +85,33 @@ func (cfg convertOpts) buildSortingColumns() []parquet.SortingColumn {
 
 type ConvertOption func(*convertOpts)
 
-func SortBy(labels ...string) ConvertOption {
+func WithSortBy(labels ...string) ConvertOption {
 	return func(opts *convertOpts) {
 		opts.sortedLabels = labels
 	}
 }
 
-func ColDuration(d time.Duration) ConvertOption {
+func WithColDuration(d time.Duration) ConvertOption {
 	return func(opts *convertOpts) {
 		opts.colDuration = d
+	}
+}
+
+func WithWriteBufferSize(s int) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.writeBufferSize = s
+	}
+}
+
+func WithPageBufferSize(s int) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.pageBufferSize = s
+	}
+}
+
+func WithName(name string) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.name = name
 	}
 }
 

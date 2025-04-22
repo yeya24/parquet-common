@@ -48,6 +48,7 @@ func TestParquetWriter(t *testing.T) {
 	// 2 row groups of size 100 per file
 	convertsOpts.numRowGroups = 3
 	convertsOpts.rowGroupSize = 100
+	convertsOpts.writeBufferSize = 10
 	convertsOpts.sortedLabels = []string{labels.MetricName, "bar"}
 
 	rr, err := NewTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h}, convertsOpts.sortedLabels...)
