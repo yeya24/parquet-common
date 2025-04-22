@@ -111,6 +111,7 @@ func ConvertTSDBBlock(
 		return 0, err
 	}
 
+	defer func() { _ = rr.Close() }()
 	w := NewShardedWrite(rr, rr.Schema(), bkt, &cfg)
 	return w.currentShard, errors.Wrap(w.Write(ctx), "error writing block")
 }
