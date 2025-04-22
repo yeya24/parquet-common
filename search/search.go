@@ -18,8 +18,10 @@ import (
 )
 
 type Constraint interface {
-	// rowRanges returns a set of non-overlapping increasing row indexes that may satisfy the constraint.
-	rowRanges(rg parquet.RowGroup, rr []rowRange) ([]rowRange, error)
+	// filter returns a set of non-overlapping increasing row indexes that may satisfy the constraint.
+	filter(rg parquet.RowGroup, primary bool, rr []rowRange) ([]rowRange, error)
 	// init initializes the constraint with respect to the file schema and projections.
 	init(s *parquet.Schema) error
+	// path is the path for the column that is constrained
+	path() string
 }
