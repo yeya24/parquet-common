@@ -105,7 +105,7 @@ func Test_Convert_TSDB(t *testing.T) {
 				}
 
 				total += n
-				series, chunks, err := rowToSeries(rr.schema, chunksDecoder, buf[:n])
+				series, chunks, err := rowToSeries(rr.tsdbSchema.Schema, chunksDecoder, buf[:n])
 				require.NoError(t, err)
 				require.Len(t, series, n)
 				for i, s := range series {
@@ -147,14 +147,14 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = rr.Close() }()
 	// 6 data cols with 10 min duration
-	require.Len(t, rr.schema.DataColsIndexes, 6)
+	require.Len(t, rr.tsdbSchema.DataColsIndexes, 6)
 
 	chunksDecoder := schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool())
 	buf := make([]parquet.Row, 100)
 	n, _ := rr.ReadRows(buf)
 	require.Equal(t, 1, n)
 
-	series, chunks, err := rowToSeries(rr.schema, chunksDecoder, buf[:n])
+	series, chunks, err := rowToSeries(rr.tsdbSchema.Schema, chunksDecoder, buf[:n])
 	require.NoError(t, err)
 	require.Len(t, series, 1)
 	require.Len(t, chunks, 1)
@@ -232,7 +232,7 @@ func Test_SortedLabels(t *testing.T) {
 	n, _ := rr.ReadRows(buf)
 	require.Equal(t, totalSeries, n)
 
-	series, chunks, err := rowToSeries(rr.schema, schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool()), buf[:n])
+	series, chunks, err := rowToSeries(rr.tsdbSchema.Schema, schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool()), buf[:n])
 	require.NoError(t, err)
 	require.Len(t, series, n)
 
@@ -259,8 +259,8 @@ func Test_SortedLabels(t *testing.T) {
 	}
 }
 
-func rowToSeries(s *schema.TSDBSchema, dec *schema.PrometheusParquetChunksDecoder, rows []parquet.Row) ([]labels.Labels, [][]chunks.Meta, error) {
-	cols := s.Schema.Columns()
+func rowToSeries(s *parquet.Schema, dec *schema.PrometheusParquetChunksDecoder, rows []parquet.Row) ([]labels.Labels, [][]chunks.Meta, error) {
+	cols := s.Columns()
 	b := labels.NewScratchBuilder(10)
 	series := make([]labels.Labels, len(rows))
 	chunksMetas := make([][]chunks.Meta, len(rows))

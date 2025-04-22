@@ -94,3 +94,35 @@ func (s *TSDBSchema) DataColumIdx(t int64) int {
 
 	return colIdx
 }
+
+func (s *TSDBSchema) LabelsProjection() *parquet.Schema {
+	g := make(parquet.Group)
+
+	for _, c := range s.Schema.Columns() {
+		if _, ok := ExtractLabelFromColumn(c[0]); !ok {
+			continue
+		}
+		lc, ok := s.Schema.Lookup(c...)
+		if !ok {
+			continue
+		}
+		g[c[0]] = lc.Node
+	}
+	return parquet.NewSchema("labels-projection", g)
+}
+
+func (s *TSDBSchema) ChunksProjection() *parquet.Schema {
+	g := make(parquet.Group)
+
+	for _, c := range s.Schema.Columns() {
+		if ok := IsDataColumn(c[0]); !ok {
+			continue
+		}
+		lc, ok := s.Schema.Lookup(c...)
+		if !ok {
+			continue
+		}
+		g[c[0]] = lc.Node
+	}
+	return parquet.NewSchema("chunk-projection", g)
+}

@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
 
@@ -31,12 +32,57 @@ import (
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 )
 
+var DEFAULT_CONVERT_OPTS = &convertOpts{
+	name:              "block",
+	rowGroupSize:      1_000_000,
+	numRowGroups:      math.MaxInt32,
+	sortedLabels:      []string{labels.MetricName},
+	bloomfilterLabels: []string{labels.MetricName},
+}
+
 type Convertible interface {
 	Index() (tsdb.IndexReader, error)
 	Chunks() (tsdb.ChunkReader, error)
 	Tombstones() (tombstones.Reader, error)
 	Meta() tsdb.BlockMeta
 }
+
+type convertOpts struct {
+	numRowGroups      int
+	rowGroupSize      int
+	name              string
+	sortedLabels      []string
+	bloomfilterLabels []string
+}
+
+func (cfg convertOpts) buildBloomfilterColumns() []parquet.BloomFilterColumn {
+	cols := make([]parquet.BloomFilterColumn, 0, len(cfg.bloomfilterLabels))
+	for _, label := range cfg.bloomfilterLabels {
+		cols = append(cols, parquet.SplitBlockFilter(10, schema.LabelToColumn(label)))
+	}
+
+	return cols
+}
+
+func (cfg convertOpts) buildSortingColumns() []parquet.SortingColumn {
+	cols := make([]parquet.SortingColumn, 0, len(cfg.sortedLabels))
+
+	for _, label := range cfg.sortedLabels {
+		cols = append(cols, parquet.Ascending(schema.LabelToColumn(label)))
+	}
+
+	return cols
+}
+
+type ConvertOption func(*convertOpts)
+
+func SortBy(labels []string) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.sortedLabels = labels
+	}
+}
+
+var _ parquet.RowReader = &tsdbRowReader{}
 
 type tsdbRowReader struct {
 	ctx context.Context
@@ -46,7 +92,7 @@ type tsdbRowReader struct {
 	seriesSet storage.ChunkSeriesSet
 
 	rowBuilder *parquet.RowBuilder
-	schema     *schema.TSDBSchema
+	tsdbSchema *schema.TSDBSchema
 
 	encoder *schema.PrometheusParquetChunksEncoder
 }
@@ -108,10 +154,10 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 	}
 
 	return &tsdbRowReader{
-		ctx:       ctx,
-		seriesSet: cseriesSet,
-		closers:   closers,
-		schema:    s,
+		ctx:        ctx,
+		seriesSet:  cseriesSet,
+		closers:    closers,
+		tsdbSchema: s,
 
 		rowBuilder: parquet.NewRowBuilder(s.Schema),
 		encoder:    schema.NewPrometheusParquetChunksEncoder(s),
@@ -127,7 +173,7 @@ func (rr *tsdbRowReader) Close() error {
 }
 
 func (rr *tsdbRowReader) Schema() *parquet.Schema {
-	return rr.schema.Schema
+	return rr.tsdbSchema.Schema
 }
 
 func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a, b labels.Labels) int, sortedLabels ...string) index.Postings {
@@ -194,7 +240,7 @@ func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 
 		s.Labels().Range(func(l labels.Label) {
 			colName := schema.LabelToColumn(l.Name)
-			lc, _ := rr.schema.Schema.Lookup(colName)
+			lc, _ := rr.tsdbSchema.Schema.Lookup(colName)
 			rr.rowBuilder.Add(lc.ColumnIndex, parquet.ValueOf(l.Value))
 		})
 
@@ -202,7 +248,7 @@ func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 			if len(chk) == 0 {
 				continue
 			}
-			rr.rowBuilder.Add(rr.schema.DataColsIndexes[idx], parquet.ValueOf(chk))
+			rr.rowBuilder.Add(rr.tsdbSchema.DataColsIndexes[idx], parquet.ValueOf(chk))
 		}
 		buf[i] = rr.rowBuilder.AppendRow(buf[i][:0])
 		i++
