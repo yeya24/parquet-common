@@ -33,7 +33,7 @@ func TestParquetWriter(t *testing.T) {
 	totalNumberOfSeries := 1_150
 	for i := 0; i != totalNumberOfSeries; i++ {
 		for j := 0; j < 10; j++ {
-			lbls := labels.FromStrings(labels.MetricName, fmt.Sprintf("foo_%d", i), "bar", fmt.Sprintf("%d", 2*i))
+			lbls := labels.FromStrings(labels.MetricName, fmt.Sprintf("foo_%d", i%200), "bar", fmt.Sprintf("%d", 2*i))
 			_, err := app.Append(0, lbls, (time.Minute * time.Duration(j)).Milliseconds(), float64(i))
 			require.NoError(t, err)
 		}
@@ -129,4 +129,27 @@ func TestParquetWriter(t *testing.T) {
 	}
 	require.Len(t, fSeries, totalNumberOfSeries)
 	require.Len(t, fChunks, totalNumberOfSeries)
+
+	// make sure the series are sorted
+	for i := 0; i < len(fSeries)-1; i++ {
+		require.LessOrEqual(t, fSeries[i].Get(labels.MetricName), fSeries[i+1].Get(labels.MetricName))
+		if fSeries[i].Get(labels.MetricName) == fSeries[i+1].Get(labels.MetricName) {
+			require.LessOrEqual(t, fSeries[i].Get("bar"), fSeries[i+1].Get("bar"))
+		}
+	}
+}
+
+func Test_ShouldRespectContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	bkt, err := filesystem.NewBucket(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bkt.Close() })
+	s := parquet.NewSchema("testRow", parquet.Group{
+		"testField": parquet.Leaf(parquet.FixedLenByteArrayType(32)),
+	})
+
+	sw, err := newSplitFileWriter(ctx, bkt, s, map[string]*parquet.Schema{"test": s})
+	require.NoError(t, err)
+	require.ErrorIs(t, sw.Close(), context.Canceled)
 }

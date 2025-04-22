@@ -26,7 +26,7 @@ func (b *bReadAt) ReadAt(p []byte, off int64) (n int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	n, err = rc.Read(p)
 	if err == io.EOF {
 		err = nil
