@@ -43,18 +43,18 @@ func TestParquetWriter(t *testing.T) {
 	h := st.Head()
 	mint, maxt := (time.Minute * 30).Milliseconds(), (time.Minute*90).Milliseconds()-1
 
-	convertsOpts := DEFAULT_CONVERT_OPTS
+	convertsOpts := DefaultConvertOpts
 
 	// 2 row groups of size 100 per file
 	convertsOpts.numRowGroups = 3
 	convertsOpts.rowGroupSize = 100
 	convertsOpts.sortedLabels = []string{labels.MetricName, "bar"}
 
-	rr, err := newTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h}, convertsOpts.sortedLabels...)
+	rr, err := NewTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h}, convertsOpts.sortedLabels...)
 	require.NoError(t, err)
 	defer func() { _ = rr.Close() }()
 
-	sw := NewShardedWrite(rr, rr.tsdbSchema, bkt, convertsOpts)
+	sw := NewShardedWrite(rr, rr.tsdbSchema, bkt, &convertsOpts)
 	err = sw.Write(ctx)
 	require.NoError(t, err)
 
@@ -67,7 +67,6 @@ func TestParquetWriter(t *testing.T) {
 
 	for i := 0; i < totalShards; i++ {
 		labelsFileName := schema.LabelsPfileNameForShard(convertsOpts.name, i)
-		fmt.Println(labelsFileName)
 		labelsAttr, err := bkt.Attributes(ctx, labelsFileName)
 		require.NoError(t, err)
 
@@ -101,7 +100,6 @@ func TestParquetWriter(t *testing.T) {
 		}
 
 		chunksFileName := schema.ChunksPfileNameForShard(convertsOpts.name, i)
-		fmt.Println(chunksFileName)
 		chunksAttr, err := bkt.Attributes(ctx, chunksFileName)
 		require.NoError(t, err)
 

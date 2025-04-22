@@ -69,11 +69,12 @@ func (c *ShardedWriter) convertShard(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
+	c.currentShard++
+
 	if n < int64(rowsToWrite) {
 		return false, nil
 	}
 
-	c.currentShard++
 	return true, nil
 }
 

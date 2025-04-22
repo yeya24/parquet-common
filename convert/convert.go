@@ -20,9 +20,11 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/parquet-go/parquet-go"
+	"github.com/pkg/errors"
 	"github.com/prometheus-community/parquet-common/schema"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
@@ -30,11 +32,13 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
+	"github.com/thanos-io/objstore"
 )
 
-var DEFAULT_CONVERT_OPTS = &convertOpts{
+var DefaultConvertOpts = convertOpts{
 	name:              "block",
 	rowGroupSize:      1_000_000,
+	colDuration:       time.Hour * 8,
 	numRowGroups:      math.MaxInt32,
 	sortedLabels:      []string{labels.MetricName},
 	bloomfilterLabels: []string{labels.MetricName},
@@ -50,6 +54,7 @@ type Convertible interface {
 type convertOpts struct {
 	numRowGroups      int
 	rowGroupSize      int
+	colDuration       time.Duration
 	name              string
 	sortedLabels      []string
 	bloomfilterLabels []string
@@ -76,15 +81,43 @@ func (cfg convertOpts) buildSortingColumns() []parquet.SortingColumn {
 
 type ConvertOption func(*convertOpts)
 
-func SortBy(labels []string) ConvertOption {
+func SortBy(labels ...string) ConvertOption {
 	return func(opts *convertOpts) {
 		opts.sortedLabels = labels
 	}
 }
 
-var _ parquet.RowReader = &tsdbRowReader{}
+func ColDuration(d time.Duration) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.colDuration = d
+	}
+}
 
-type tsdbRowReader struct {
+func ConvertTSDBBlock(
+	ctx context.Context,
+	bkt objstore.Bucket,
+	mint, maxt int64,
+	blks []Convertible,
+	opts ...ConvertOption,
+) (int, error) {
+	cfg := DefaultConvertOpts
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	rr, err := NewTsdbRowReader(ctx, mint, maxt, cfg.colDuration.Milliseconds(), blks, cfg.sortedLabels...)
+	if err != nil {
+		return 0, err
+	}
+
+	w := NewShardedWrite(rr, rr.Schema(), bkt, &cfg)
+	return w.currentShard, errors.Wrap(w.Write(ctx), "error writing block")
+}
+
+var _ parquet.RowReader = &TsdbRowReader{}
+
+type TsdbRowReader struct {
 	ctx context.Context
 
 	closers []io.Closer
@@ -94,10 +127,11 @@ type tsdbRowReader struct {
 	rowBuilder *parquet.RowBuilder
 	tsdbSchema *schema.TSDBSchema
 
-	encoder *schema.PrometheusParquetChunksEncoder
+	encoder   *schema.PrometheusParquetChunksEncoder
+	totalRead int64
 }
 
-func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible, sortedLabels ...string) (*tsdbRowReader, error) {
+func NewTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible, sortedLabels ...string) (*TsdbRowReader, error) {
 	var (
 		seriesSets = make([]storage.ChunkSeriesSet, 0, len(blks))
 		closers    = make([]io.Closer, 0, len(blks))
@@ -153,7 +187,7 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 		return nil, fmt.Errorf("unable to build index reader from block: %s", err)
 	}
 
-	return &tsdbRowReader{
+	return &TsdbRowReader{
 		ctx:        ctx,
 		seriesSet:  cseriesSet,
 		closers:    closers,
@@ -164,7 +198,7 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 	}, nil
 }
 
-func (rr *tsdbRowReader) Close() error {
+func (rr *TsdbRowReader) Close() error {
 	err := &multierror.Error{}
 	for i := range rr.closers {
 		err = multierror.Append(err, rr.closers[i].Close())
@@ -172,8 +206,8 @@ func (rr *tsdbRowReader) Close() error {
 	return err.ErrorOrNil()
 }
 
-func (rr *tsdbRowReader) Schema() *parquet.Schema {
-	return rr.tsdbSchema.Schema
+func (rr *TsdbRowReader) Schema() *schema.TSDBSchema {
+	return rr.tsdbSchema
 }
 
 func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a, b labels.Labels) int, sortedLabels ...string) index.Postings {
@@ -213,7 +247,7 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a
 	return index.NewListPostings(ep)
 }
 
-func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
+func (rr *TsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 	select {
 	case <-rr.ctx.Done():
 		return 0, rr.ctx.Err()
@@ -253,6 +287,7 @@ func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 		buf[i] = rr.rowBuilder.AppendRow(buf[i][:0])
 		i++
 	}
+	rr.totalRead += int64(i)
 	if i < len(buf) {
 		return i, io.EOF
 	}
