@@ -17,11 +17,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/parquet-go/parquet-go"
+	"github.com/pkg/errors"
 	"github.com/prometheus-community/parquet-common/schema"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
@@ -29,7 +32,19 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
+	"github.com/thanos-io/objstore"
 )
+
+var DefaultConvertOpts = convertOpts{
+	name:              "block",
+	rowGroupSize:      1_000_000,
+	colDuration:       time.Hour * 8,
+	numRowGroups:      math.MaxInt32,
+	sortedLabels:      []string{labels.MetricName},
+	bloomfilterLabels: []string{labels.MetricName},
+	pageBufferSize:    parquet.DefaultPageBufferSize,
+	writeBufferSize:   parquet.DefaultWriteBufferSize,
+}
 
 type Convertible interface {
 	Index() (tsdb.IndexReader, error)
@@ -38,7 +53,94 @@ type Convertible interface {
 	Meta() tsdb.BlockMeta
 }
 
-type tsdbRowReader struct {
+type convertOpts struct {
+	numRowGroups      int
+	rowGroupSize      int
+	colDuration       time.Duration
+	name              string
+	sortedLabels      []string
+	bloomfilterLabels []string
+	pageBufferSize    int
+	writeBufferSize   int
+}
+
+func (cfg convertOpts) buildBloomfilterColumns() []parquet.BloomFilterColumn {
+	cols := make([]parquet.BloomFilterColumn, 0, len(cfg.bloomfilterLabels))
+	for _, label := range cfg.bloomfilterLabels {
+		cols = append(cols, parquet.SplitBlockFilter(10, schema.LabelToColumn(label)))
+	}
+
+	return cols
+}
+
+func (cfg convertOpts) buildSortingColumns() []parquet.SortingColumn {
+	cols := make([]parquet.SortingColumn, 0, len(cfg.sortedLabels))
+
+	for _, label := range cfg.sortedLabels {
+		cols = append(cols, parquet.Ascending(schema.LabelToColumn(label)))
+	}
+
+	return cols
+}
+
+type ConvertOption func(*convertOpts)
+
+func WithSortBy(labels ...string) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.sortedLabels = labels
+	}
+}
+
+func WithColDuration(d time.Duration) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.colDuration = d
+	}
+}
+
+func WithWriteBufferSize(s int) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.writeBufferSize = s
+	}
+}
+
+func WithPageBufferSize(s int) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.pageBufferSize = s
+	}
+}
+
+func WithName(name string) ConvertOption {
+	return func(opts *convertOpts) {
+		opts.name = name
+	}
+}
+
+func ConvertTSDBBlock(
+	ctx context.Context,
+	bkt objstore.Bucket,
+	mint, maxt int64,
+	blks []Convertible,
+	opts ...ConvertOption,
+) (int, error) {
+	cfg := DefaultConvertOpts
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	rr, err := NewTsdbRowReader(ctx, mint, maxt, cfg.colDuration.Milliseconds(), blks, cfg.sortedLabels...)
+	if err != nil {
+		return 0, err
+	}
+
+	defer func() { _ = rr.Close() }()
+	w := NewShardedWrite(rr, rr.Schema(), bkt, &cfg)
+	return w.currentShard, errors.Wrap(w.Write(ctx), "error writing block")
+}
+
+var _ parquet.RowReader = &TsdbRowReader{}
+
+type TsdbRowReader struct {
 	ctx context.Context
 
 	closers []io.Closer
@@ -46,12 +148,13 @@ type tsdbRowReader struct {
 	seriesSet storage.ChunkSeriesSet
 
 	rowBuilder *parquet.RowBuilder
-	schema     *schema.TSDBSchema
+	tsdbSchema *schema.TSDBSchema
 
-	encoder *schema.PrometheusParquetChunksEncoder
+	encoder   *schema.PrometheusParquetChunksEncoder
+	totalRead int64
 }
 
-func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible, sortedLabels ...string) (*tsdbRowReader, error) {
+func NewTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks []Convertible, sortedLabels ...string) (*TsdbRowReader, error) {
 	var (
 		seriesSets = make([]storage.ChunkSeriesSet, 0, len(blks))
 		closers    = make([]io.Closer, 0, len(blks))
@@ -107,18 +210,18 @@ func newTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 		return nil, fmt.Errorf("unable to build index reader from block: %s", err)
 	}
 
-	return &tsdbRowReader{
-		ctx:       ctx,
-		seriesSet: cseriesSet,
-		closers:   closers,
-		schema:    s,
+	return &TsdbRowReader{
+		ctx:        ctx,
+		seriesSet:  cseriesSet,
+		closers:    closers,
+		tsdbSchema: s,
 
 		rowBuilder: parquet.NewRowBuilder(s.Schema),
 		encoder:    schema.NewPrometheusParquetChunksEncoder(s),
 	}, nil
 }
 
-func (rr *tsdbRowReader) Close() error {
+func (rr *TsdbRowReader) Close() error {
 	err := &multierror.Error{}
 	for i := range rr.closers {
 		err = multierror.Append(err, rr.closers[i].Close())
@@ -126,8 +229,8 @@ func (rr *tsdbRowReader) Close() error {
 	return err.ErrorOrNil()
 }
 
-func (rr *tsdbRowReader) Schema() *parquet.Schema {
-	return rr.schema.Schema
+func (rr *TsdbRowReader) Schema() *schema.TSDBSchema {
+	return rr.tsdbSchema
 }
 
 func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a, b labels.Labels) int, sortedLabels ...string) index.Postings {
@@ -167,7 +270,7 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a
 	return index.NewListPostings(ep)
 }
 
-func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
+func (rr *TsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 	select {
 	case <-rr.ctx.Done():
 		return 0, rr.ctx.Err()
@@ -194,7 +297,7 @@ func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 
 		s.Labels().Range(func(l labels.Label) {
 			colName := schema.LabelToColumn(l.Name)
-			lc, _ := rr.schema.Schema.Lookup(colName)
+			lc, _ := rr.tsdbSchema.Schema.Lookup(colName)
 			rr.rowBuilder.Add(lc.ColumnIndex, parquet.ValueOf(l.Value))
 		})
 
@@ -202,11 +305,12 @@ func (rr *tsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 			if len(chk) == 0 {
 				continue
 			}
-			rr.rowBuilder.Add(rr.schema.DataColsIndexes[idx], parquet.ValueOf(chk))
+			rr.rowBuilder.Add(rr.tsdbSchema.DataColsIndexes[idx], parquet.ValueOf(chk))
 		}
 		buf[i] = rr.rowBuilder.AppendRow(buf[i][:0])
 		i++
 	}
+	rr.totalRead += int64(i)
 	if i < len(buf) {
 		return i, io.EOF
 	}

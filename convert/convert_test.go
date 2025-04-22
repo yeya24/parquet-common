@@ -18,16 +18,20 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/prometheus-community/parquet-common/schema"
+	"github.com/prometheus-community/parquet-common/util"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/stretchr/testify/require"
+	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/objstore/providers/filesystem"
 )
 
 func Test_Convert_TSDB(t *testing.T) {
@@ -75,6 +79,10 @@ func Test_Convert_TSDB(t *testing.T) {
 			st := teststorage.New(t)
 			t.Cleanup(func() { _ = st.Close() })
 
+			bkt, err := filesystem.NewBucket(t.TempDir())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = bkt.Close() })
+
 			app := st.Appender(ctx)
 			seriesHash := make(map[uint64]struct{})
 			for i := 0; i != 1_000; i++ {
@@ -89,38 +97,29 @@ func Test_Convert_TSDB(t *testing.T) {
 			require.NoError(t, app.Commit())
 
 			h := st.Head()
-			rr, err := newTsdbRowReader(ctx, h.MinTime(), h.MaxTime(), tt.dataColDuration.Milliseconds(), []Convertible{h})
+			shards, err := ConvertTSDBBlock(ctx, bkt, h.MinTime(), h.MaxTime(), []Convertible{h}, WithColDuration(tt.dataColDuration), WithSortBy(labels.MetricName))
 			require.NoError(t, err)
+			require.Equal(t, 1, shards)
 
-			defer func() { _ = rr.Close() }()
+			labelsFileName := schema.LabelsPfileNameForShard(DefaultConvertOpts.name, 0)
+			chunksFileName := schema.ChunksPfileNameForShard(DefaultConvertOpts.name, 0)
+			lf, cf, err := openParquetFiles(ctx, bkt, labelsFileName, chunksFileName)
+			require.NoError(t, err)
+			series, chunks, err := readSeries(lf, cf)
+			require.NoError(t, err)
+			require.Equal(t, st.DB.Head().NumSeries(), uint64(len(series)))
+			require.Equal(t, st.DB.Head().NumSeries(), uint64(len(chunks)))
 
-			buf := make([]parquet.Row, 100)
-			chunksDecoder := schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool())
-			total := 0
-
-			for {
-				n, _ := rr.ReadRows(buf)
-				if n == 0 {
-					break
+			for i, s := range series {
+				require.Contains(t, seriesHash, s.Hash())
+				require.Len(t, chunks[i], tt.expectedNumberOfChunks)
+				totalSamples := 0
+				for _, c := range chunks[i] {
+					require.Equal(t, tt.expectedPointsPerChunk, c.Chunk.NumSamples())
+					totalSamples += c.Chunk.NumSamples()
 				}
-
-				total += n
-				series, chunks, err := rowToSeries(rr.schema, chunksDecoder, buf[:n])
-				require.NoError(t, err)
-				require.Len(t, series, n)
-				for i, s := range series {
-					require.Contains(t, seriesHash, s.Hash())
-					require.Len(t, chunks[i], tt.expectedNumberOfChunks)
-					totalSamples := 0
-					for _, c := range chunks[i] {
-						require.Equal(t, tt.expectedPointsPerChunk, c.Chunk.NumSamples())
-						totalSamples += c.Chunk.NumSamples()
-					}
-					require.Equal(t, tt.numberOfSamples, totalSamples)
-				}
+				require.Equal(t, tt.numberOfSamples, totalSamples)
 			}
-
-			require.Equal(t, st.DB.Head().NumSeries(), uint64(total))
 		})
 	}
 }
@@ -129,6 +128,10 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	ctx := context.Background()
 	st := teststorage.New(t)
 	t.Cleanup(func() { _ = st.Close() })
+
+	bkt, err := filesystem.NewBucket(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bkt.Close() })
 
 	app := st.Appender(ctx)
 
@@ -143,18 +146,28 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 
 	h := st.Head()
 	mint, maxt := (time.Minute * 30).Milliseconds(), (time.Minute*90).Milliseconds()-1
-	rr, err := newTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h})
+
+	datColDuration := time.Minute * 10
+	shards, err := ConvertTSDBBlock(ctx, bkt, mint, maxt, []Convertible{h}, WithColDuration(datColDuration), WithSortBy(labels.MetricName))
 	require.NoError(t, err)
-	defer func() { _ = rr.Close() }()
+	require.Equal(t, 1, shards)
+
+	labelsFileName := schema.LabelsPfileNameForShard(DefaultConvertOpts.name, 0)
+	chunksFileName := schema.ChunksPfileNameForShard(DefaultConvertOpts.name, 0)
+	lf, cf, err := openParquetFiles(ctx, bkt, labelsFileName, chunksFileName)
+	require.NoError(t, err)
+
+	// Check metadatas
+	for _, file := range []*parquet.File{lf, cf} {
+		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.MinTMd], strconv.FormatInt(mint, 10))
+		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.MaxTMd], strconv.FormatInt(maxt, 10))
+		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.DataColSizeMd], strconv.FormatInt(datColDuration.Milliseconds(), 10))
+	}
+
 	// 6 data cols with 10 min duration
-	require.Len(t, rr.schema.DataColsIndexes, 6)
+	require.Len(t, cf.Schema().Columns(), 6)
+	series, chunks, err := readSeries(lf, cf)
 
-	chunksDecoder := schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool())
-	buf := make([]parquet.Row, 100)
-	n, _ := rr.ReadRows(buf)
-	require.Equal(t, 1, n)
-
-	series, chunks, err := rowToSeries(rr.schema, chunksDecoder, buf[:n])
 	require.NoError(t, err)
 	require.Len(t, series, 1)
 	require.Len(t, chunks, 1)
@@ -175,6 +188,10 @@ func Test_SortedLabels(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	st2 := teststorage.New(t)
 	t.Cleanup(func() { _ = st2.Close() })
+
+	bkt, err := filesystem.NewBucket(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bkt.Close() })
 
 	app := st.Appender(ctx)
 	app2 := st2.Appender(ctx)
@@ -225,16 +242,18 @@ func Test_SortedLabels(t *testing.T) {
 	h := st.Head()
 	h2 := st2.Head()
 	// lets sort first by `zzz` as its not the default sorting on TSDB
-	rr, err := newTsdbRowReader(ctx, 0, time.Minute.Milliseconds(), (time.Minute * 10).Milliseconds(), []Convertible{h, h2}, "zzz", labels.MetricName)
+	shards, err := ConvertTSDBBlock(ctx, bkt, 0, time.Minute.Milliseconds(), []Convertible{h2, h}, WithColDuration(time.Minute*10), WithSortBy("zzz", labels.MetricName))
+	require.NoError(t, err)
+	require.Equal(t, 1, shards)
+
+	labelsFileName := schema.LabelsPfileNameForShard(DefaultConvertOpts.name, 0)
+	chunksFileName := schema.ChunksPfileNameForShard(DefaultConvertOpts.name, 0)
+	lf, cf, err := openParquetFiles(ctx, bkt, labelsFileName, chunksFileName)
 	require.NoError(t, err)
 
-	buf := make([]parquet.Row, h.NumSeries()+h2.NumSeries())
-	n, _ := rr.ReadRows(buf)
-	require.Equal(t, totalSeries, n)
-
-	series, chunks, err := rowToSeries(rr.schema, schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool()), buf[:n])
+	series, chunks, err := readSeries(lf, cf)
 	require.NoError(t, err)
-	require.Len(t, series, n)
+	require.Len(t, series, totalSeries)
 
 	for i := 0; i < len(series)-1; i++ {
 		require.LessOrEqual(t, series[i].Get("zzz"), series[i+1].Get("zzz"))
@@ -259,8 +278,65 @@ func Test_SortedLabels(t *testing.T) {
 	}
 }
 
-func rowToSeries(s *schema.TSDBSchema, dec *schema.PrometheusParquetChunksDecoder, rows []parquet.Row) ([]labels.Labels, [][]chunks.Meta, error) {
-	cols := s.Schema.Columns()
+func openParquetFiles(ctx context.Context, bkt objstore.Bucket, labelsFileName, chunksFileName string) (*parquet.File, *parquet.File, error) {
+	labelsAttr, err := bkt.Attributes(ctx, labelsFileName)
+	if err != nil {
+		return nil, nil, err
+	}
+	labelsFile, err := parquet.OpenFile(util.NewBucketReadAt(ctx, labelsFileName, bkt), labelsAttr.Size)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	chunksAttr, err := bkt.Attributes(ctx, chunksFileName)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	chunksFile, err := parquet.OpenFile(util.NewBucketReadAt(ctx, chunksFileName, bkt), chunksAttr.Size)
+	if err != nil {
+		return nil, nil, err
+	}
+	return labelsFile, chunksFile, nil
+}
+
+func readSeries(labelsFile, chunksFile *parquet.File) ([]labels.Labels, [][]chunks.Meta, error) {
+	lr := parquet.NewGenericReader[any](labelsFile)
+	cr := parquet.NewGenericReader[any](chunksFile)
+
+	labelsBuff := make([]parquet.Row, 100)
+	chunksBuff := make([]parquet.Row, 100)
+	rLbls := make([]labels.Labels, 0, 100)
+	rChunks := make([][]chunks.Meta, 0, 100)
+	dec := schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool())
+	for {
+		nl, _ := lr.ReadRows(labelsBuff)
+		if nl == 0 {
+			break
+		}
+
+		nc, _ := cr.ReadRows(chunksBuff)
+
+		if nc != nl {
+			return nil, nil, fmt.Errorf("unexpected number of rows read: %d, expected %d", nl, nc)
+		}
+		s, _, err := rowToSeries(lr.Schema(), dec, labelsBuff[:nl])
+		if err != nil {
+			return nil, nil, err
+		}
+		_, c, err := rowToSeries(cr.Schema(), dec, chunksBuff[:nl])
+		if err != nil {
+			return nil, nil, err
+		}
+		rLbls = append(rLbls, s...)
+		rChunks = append(rChunks, c...)
+	}
+
+	return rLbls, rChunks, nil
+}
+
+func rowToSeries(s *parquet.Schema, dec *schema.PrometheusParquetChunksDecoder, rows []parquet.Row) ([]labels.Labels, [][]chunks.Meta, error) {
+	cols := s.Columns()
 	b := labels.NewScratchBuilder(10)
 	series := make([]labels.Labels, len(rows))
 	chunksMetas := make([][]chunks.Meta, len(rows))

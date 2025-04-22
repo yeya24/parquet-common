@@ -16,6 +16,10 @@ package schema
 import (
 	"fmt"
 	"strings"
+
+	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/compress/zstd"
+	"github.com/parquet-go/parquet-go/format"
 )
 
 const (
@@ -23,6 +27,8 @@ const (
 	DataColumnPrefix  = "s_data_"
 
 	DataColSizeMd = "data_col_duration_ms"
+	MinTMd        = "minT"
+	MaxTMd        = "maxT"
 )
 
 func LabelToColumn(lbl string) string {
@@ -43,4 +49,31 @@ func IsDataColumn(col string) bool {
 
 func DataColumn(i int) string {
 	return fmt.Sprintf("%s%v", DataColumnPrefix, i)
+}
+
+func LabelsPfileNameForShard(name string, shard int) string {
+	return fmt.Sprintf("%s/%d.%s", name, shard, "labels.parquet")
+}
+
+func ChunksPfileNameForShard(name string, shard int) string {
+	return fmt.Sprintf("%s/%d.%s", name, shard, "chunks.parquet")
+}
+
+func WithCompression(s *parquet.Schema) *parquet.Schema {
+	g := make(parquet.Group)
+
+	for _, c := range s.Columns() {
+		lc, _ := s.Lookup(c...)
+		g[lc.Path[0]] = parquet.Compressed(lc.Node, &zstd.Codec{Level: zstd.SpeedBetterCompression})
+	}
+
+	return parquet.NewSchema("uncompressed", g)
+}
+
+func MetadataToMap(md []format.KeyValue) map[string]string {
+	r := make(map[string]string, len(md))
+	for _, kv := range md {
+		r[kv.Key] = kv.Value
+	}
+	return r
 }
