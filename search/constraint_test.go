@@ -41,84 +41,105 @@ func buildFile[T any](t testing.TB, rows []T) *parquet.File {
 }
 
 func TestEqual(t *testing.T) {
+	type expectation struct {
+		constraints []Constraint
+		expect      []rowRange
+	}
+	type testcase[T any] struct {
+		rows         []T
+		expectations []expectation
+	}
+
 	t.Run("", func(t *testing.T) {
-		type S struct {
+		type s struct {
 			A int64  `parquet:",optional,dict"`
 			B int64  `parquet:",optional,dict"`
 			C string `parquet:",optional,dict"`
 		}
-		srows := []S{
+		for _, tt := range []testcase[s]{
 			{
-				A: 1,
-				B: 2,
-				C: "a",
+				rows: []s{
+					{
+						A: 1,
+						B: 2,
+						C: "a",
+					},
+					{
+						A: 3,
+						B: 4,
+						C: "b",
+					},
+					{
+						A: 7,
+						B: 12,
+						C: "c",
+					},
+					{
+						A: 9,
+						B: 22,
+						C: "d",
+					},
+					{
+						A: 0,
+						B: 1,
+						C: "e",
+					},
+					{
+						A: 7,
+						B: 1,
+						C: "f",
+					},
+					{
+						A: 7,
+						B: 1,
+						C: "g",
+					},
+					{
+						A: 0,
+						B: 1,
+						C: "h",
+					},
+				},
+				expectations: []expectation{
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(7)),
+							Equal("C", parquet.ValueOf("g")),
+						},
+						expect: []rowRange{
+							{from: 6, count: 1},
+						},
+					},
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(7)),
+						},
+						expect: []rowRange{
+							{from: 2, count: 1},
+							{from: 5, count: 2},
+						},
+					},
+				},
 			},
-			{
-				A: 3,
-				B: 4,
-				C: "b",
-			},
-			{
-				A: 7,
-				B: 12,
-				C: "c",
-			},
-			{
-				A: 9,
-				B: 22,
-				C: "d",
-			},
-			{
-				A: 0,
-				B: 1,
-				C: "e",
-			},
-			{
-				A: 7,
-				B: 1,
-				C: "f",
-			},
-			{
-				A: 7,
-				B: 1,
-				C: "g",
-			},
-			{
-				A: 0,
-				B: 1,
-				C: "h",
-			},
+		} {
+
+			sfile := buildFile(t, tt.rows)
+			for _, expectation := range tt.expectations {
+				t.Run("", func(t *testing.T) {
+					if err := initialize(sfile.Schema(), expectation.constraints...); err != nil {
+						t.Fatal(err)
+					}
+					for _, rg := range sfile.RowGroups() {
+						rr, err := filter(rg, expectation.constraints...)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !slices.Equal(rr, expectation.expect) {
+							t.Fatalf("expected %+v, got %+v", expectation.expect, rr)
+						}
+					}
+				})
+			}
 		}
-		sfile := buildFile(t, srows)
-		t.Run("", func(t *testing.T) {
-			cs := []Constraint{Equal("A", parquet.ValueOf(7)), Equal("C", parquet.ValueOf("g"))}
-			if err := initialize(sfile.Schema(), cs...); err != nil {
-				t.Fatal(err)
-			}
-			for _, rg := range sfile.RowGroups() {
-				rr, err := filter(rg, cs...)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if expect := []rowRange{{from: 6, count: 1}}; !slices.Equal(rr, expect) {
-					t.Fatalf("expected %+v, got %+v", expect, rr)
-				}
-			}
-		})
-		t.Run("", func(t *testing.T) {
-			cs := []Constraint{Equal("A", parquet.ValueOf(7))}
-			if err := initialize(sfile.Schema(), cs...); err != nil {
-				t.Fatal(err)
-			}
-			for _, rg := range sfile.RowGroups() {
-				rr, err := filter(rg, cs...)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if expect := []rowRange{{from: 2, count: 1}, {from: 5, count: 2}}; !slices.Equal(rr, expect) {
-					t.Fatalf("expected %+v, got %+v", expect, rr)
-				}
-			}
-		})
 	})
 }
