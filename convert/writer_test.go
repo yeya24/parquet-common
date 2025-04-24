@@ -64,7 +64,7 @@ func TestParquetWriter(t *testing.T) {
 	convertsOpts.writeBufferSize = 10
 	convertsOpts.sortedLabels = []string{labels.MetricName, "bar"}
 
-	rr, err := NewTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h}, convertsOpts.sortedLabels...)
+	rr, err := NewTsdbRowReader(ctx, mint, maxt, (time.Minute * 10).Milliseconds(), []Convertible{h}, convertsOpts)
 	require.NoError(t, err)
 	defer func() { _ = rr.Close() }()
 
