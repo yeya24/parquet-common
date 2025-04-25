@@ -102,7 +102,7 @@ func TestParquetWriter(t *testing.T) {
 		require.ErrorIs(t, err, io.EOF)
 		require.Equal(t, math.Min(float64(remainingRows), float64(convertsOpts.numRowGroups*convertsOpts.rowGroupSize)), float64(n))
 
-		series, chunks, err := rowToSeries(labelsFile.Schema(), chunksDecoder, buf[:n])
+		series, chunks, err := rowToSeries(t, labelsFile.Schema(), chunksDecoder, buf[:n])
 		require.NoError(t, err)
 		require.Len(t, series, n)
 		require.Len(t, chunks, n)
@@ -125,7 +125,7 @@ func TestParquetWriter(t *testing.T) {
 		require.ErrorIs(t, err, io.EOF)
 		require.Equal(t, math.Min(float64(remainingRows), float64(convertsOpts.numRowGroups*convertsOpts.rowGroupSize)), float64(n))
 
-		series, chunks, err = rowToSeries(chunksFile.Schema(), chunksDecoder, buf[:n])
+		series, chunks, err = rowToSeries(t, chunksFile.Schema(), chunksDecoder, buf[:n])
 		require.NoError(t, err)
 		require.Len(t, series, n)
 		require.Len(t, chunks, n)

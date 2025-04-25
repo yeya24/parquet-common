@@ -324,6 +324,12 @@ func (rr *TsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 	}()
 
 	i, j := 0, 0
+	lblsIdxs := []int{}
+	colIndex, ok := rr.tsdbSchema.Schema.Lookup(schema.ColIndexes)
+	if !ok {
+		return 0, fmt.Errorf("unable to find indexes")
+	}
+
 	for promise := range c {
 		j++
 		if promise.err != nil {
@@ -331,12 +337,16 @@ func (rr *TsdbRowReader) ReadRows(buf []parquet.Row) (int, error) {
 		}
 
 		rr.rowBuilder.Reset()
+		lblsIdxs = lblsIdxs[:0]
 
 		promise.s.Labels().Range(func(l labels.Label) {
 			colName := schema.LabelToColumn(l.Name)
 			lc, _ := rr.tsdbSchema.Schema.Lookup(colName)
 			rr.rowBuilder.Add(lc.ColumnIndex, parquet.ValueOf(l.Value))
+			lblsIdxs = append(lblsIdxs, lc.ColumnIndex)
 		})
+
+		rr.rowBuilder.Add(colIndex.ColumnIndex, parquet.ValueOf(schema.EncodeIntSlice(lblsIdxs)))
 
 		chkBytes := <-promise.chunkBytesChan
 		// skip series that have no chunks in the requested time
