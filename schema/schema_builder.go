@@ -52,6 +52,8 @@ func (b *Builder) AddLabelNameColumn(lbls ...string) {
 
 func (b *Builder) Build() (*TSDBSchema, error) {
 	colIdx := 0
+
+	b.g[ColIndexes] = parquet.Encoded(parquet.Leaf(parquet.ByteArrayType), &parquet.DeltaByteArray)
 	for i := b.mint; i <= b.maxt; i += b.dataColDurationMs {
 		b.g[DataColumn(colIdx)] = parquet.Encoded(parquet.Leaf(parquet.ByteArrayType), &parquet.DeltaLengthByteArray)
 		colIdx++
@@ -97,8 +99,14 @@ func (s *TSDBSchema) DataColumIdx(t int64) int {
 	return colIdx
 }
 
-func (s *TSDBSchema) LabelsProjection() *parquet.Schema {
+func (s *TSDBSchema) LabelsProjection() (*parquet.Schema, error) {
 	g := make(parquet.Group)
+
+	lc, ok := s.Schema.Lookup(ColIndexes)
+	if !ok {
+		return nil, fmt.Errorf("column %v not found", ColIndexes)
+	}
+	g[ColIndexes] = lc.Node
 
 	for _, c := range s.Schema.Columns() {
 		if _, ok := ExtractLabelFromColumn(c[0]); !ok {
@@ -106,14 +114,14 @@ func (s *TSDBSchema) LabelsProjection() *parquet.Schema {
 		}
 		lc, ok := s.Schema.Lookup(c...)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("column %v not found", c)
 		}
 		g[c[0]] = lc.Node
 	}
-	return parquet.NewSchema("labels-projection", g)
+	return parquet.NewSchema("labels-projection", g), nil
 }
 
-func (s *TSDBSchema) ChunksProjection() *parquet.Schema {
+func (s *TSDBSchema) ChunksProjection() (*parquet.Schema, error) {
 	g := make(parquet.Group)
 
 	for _, c := range s.Schema.Columns() {
@@ -122,9 +130,9 @@ func (s *TSDBSchema) ChunksProjection() *parquet.Schema {
 		}
 		lc, ok := s.Schema.Lookup(c...)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("column %v not found", c)
 		}
 		g[c[0]] = lc.Node
 	}
-	return parquet.NewSchema("chunk-projection", g)
+	return parquet.NewSchema("chunk-projection", g), nil
 }

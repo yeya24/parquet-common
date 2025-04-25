@@ -20,6 +20,7 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/parquet-go/parquet-go"
+	"github.com/pkg/errors"
 	"github.com/prometheus-community/parquet-common/schema"
 	"github.com/prometheus-community/parquet-common/util"
 	"github.com/prometheus/prometheus/util/zeropool"
@@ -109,7 +110,12 @@ func (c *ShardedWriter) writeFile(ctx context.Context, schema *schema.TSDBSchema
 		fileOpts = append(fileOpts, parquet.KeyValueMetadata(k, v))
 	}
 
-	writer, err := newSplitFileWriter(ctx, c.bkt, schema.Schema, c.transformations(),
+	transformations, err := c.transformations()
+	if err != nil {
+		return 0, err
+	}
+
+	writer, err := newSplitFileWriter(ctx, c.bkt, schema.Schema, transformations,
 		fileOpts...,
 	)
 	if err != nil {
@@ -129,11 +135,21 @@ func (c *ShardedWriter) writeFile(ctx context.Context, schema *schema.TSDBSchema
 	return n, nil
 }
 
-func (c *ShardedWriter) transformations() map[string]*parquet.Schema {
-	return map[string]*parquet.Schema{
-		schema.LabelsPfileNameForShard(c.name, c.currentShard): schema.WithCompression(c.s.LabelsProjection()),
-		schema.ChunksPfileNameForShard(c.name, c.currentShard): schema.WithCompression(c.s.ChunksProjection()),
+func (c *ShardedWriter) transformations() (map[string]*parquet.Schema, error) {
+	lblsProjection, err := c.s.LabelsProjection()
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to get label projection")
 	}
+
+	chksProjection, err := c.s.ChunksProjection()
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to create chunk projection")
+	}
+
+	return map[string]*parquet.Schema{
+		schema.LabelsPfileNameForShard(c.name, c.currentShard): schema.WithCompression(lblsProjection),
+		schema.ChunksPfileNameForShard(c.name, c.currentShard): schema.WithCompression(chksProjection),
+	}, nil
 }
 
 var _ parquet.RowWriter = &splitPipeFileWriter{}

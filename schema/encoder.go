@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/dennwc/varint"
@@ -160,4 +161,45 @@ func (e *PrometheusParquetChunksDecoder) Decode(data []byte, mint, maxt int64) (
 	}
 
 	return result, nil
+}
+
+func EncodeIntSlice(s []int) []byte {
+	l := make([]byte, binary.MaxVarintLen32)
+	r := make([]byte, 0, len(s)*binary.MaxVarintLen32)
+
+	// Sort to compress more efficiently
+	slices.Sort(s)
+
+	// size
+	n := binary.PutVarint(l[:], int64(len(s)))
+	r = append(r, l[:n]...)
+
+	for i := 0; i < len(s); i++ {
+		n := binary.PutVarint(l[:], int64(s[i]))
+		r = append(r, l[:n]...)
+	}
+
+	return r
+}
+
+func DecodeUintSlice(b []byte) ([]int, error) {
+	buffer := bytes.NewBuffer(b)
+
+	// size
+	s, err := binary.ReadVarint(buffer)
+	if err != nil {
+		return nil, err
+	}
+
+	r := make([]int, 0, s)
+
+	for i := int64(0); i < s; i++ {
+		v, err := binary.ReadVarint(buffer)
+		if err != nil {
+			return nil, err
+		}
+		r = append(r, int(v))
+	}
+
+	return r, nil
 }
