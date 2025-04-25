@@ -186,7 +186,7 @@ func NewTsdbRowReader(ctx context.Context, mint, maxt, colDuration int64, blks [
 			}
 		}
 
-		return 0
+		return labels.Compare(a, b)
 	}
 
 	for _, blk := range blks {
@@ -272,7 +272,7 @@ func sortedPostings(ctx context.Context, indexr tsdb.IndexReader, compare func(a
 			return index.ErrPostings(fmt.Errorf("expand series: %w", err))
 		}
 
-		series = append(series, s{labels: lb.Labels().MatchLabels(true, sortedLabels...), ref: p.At()})
+		series = append(series, s{labels: lb.Labels(), ref: p.At()})
 	}
 	if err := p.Err(); err != nil {
 		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))

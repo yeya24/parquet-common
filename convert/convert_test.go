@@ -261,70 +261,64 @@ func Test_BlockHasOnlySomeSeriesInConvertTime(t *testing.T) {
 
 func Test_SortedLabels(t *testing.T) {
 	ctx := context.Background()
-	st := teststorage.New(t)
-	t.Cleanup(func() { _ = st.Close() })
-	st2 := teststorage.New(t)
-	t.Cleanup(func() { _ = st2.Close() })
 
 	bkt, err := filesystem.NewBucket(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bkt.Close() })
 
-	app := st.Appender(ctx)
-	app2 := st2.Appender(ctx)
-
+	numberOfBLocks := 10
 	totalSeries := 0
-	// Some very random series
-	for i := 0; i < 240; i++ {
-		_, err := app.Append(0, labels.FromStrings(
-			labels.MetricName, fmt.Sprintf("%v", rand.Int31()),
-			"type", "app",
-			"zzz", fmt.Sprintf("%v", rand.Int31()),
-			"i", fmt.Sprintf("%v", i),
-		), 10, float64(i))
-		require.NoError(t, err)
-		totalSeries++
+	storages := make([]*teststorage.TestStorage, numberOfBLocks)
+	heads := make([]Convertible, numberOfBLocks)
+	for i := 0; i < numberOfBLocks; i++ {
+		storages[i] = teststorage.New(t)
+		t.Cleanup(func() { _ = storages[i].Close() })
+		heads[i] = storages[i].Head()
 	}
 
-	// Less random series making sure some metric names have more than 1 foo value
-	for i := 0; i < 240; i++ {
-		_, err := app2.Append(0, labels.FromStrings(
-			labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20),
-			"type", "app2",
-			"zzz", fmt.Sprintf("%v", rand.Int31()),
-			"i", fmt.Sprintf("%v", i),
-		), 10, float64(i))
-		require.NoError(t, err)
-		totalSeries++
+	for si, s := range storages {
+		app := s.Appender(ctx)
+		// Some very random series
+		for i := 0; i < 240; i++ {
+			_, err := app.Append(0, labels.FromStrings(
+				labels.MetricName, fmt.Sprintf("%v", rand.Int31()),
+				"type", fmt.Sprintf("block_%v", si),
+				"zzz", fmt.Sprintf("%v", rand.Int31()),
+				"i", fmt.Sprintf("%v", i),
+			), 10, float64(i))
+			require.NoError(t, err)
+			totalSeries++
+		}
+		require.NoError(t, app.Commit())
 	}
 
 	// Lets create some common series on both blocks
+	name := "duplicated"
+	zzz := "duplicated"
 	for i := 0; i < 240; i++ {
-		lbls := labels.FromStrings(
-			labels.MetricName, fmt.Sprintf("%v", rand.Int31()%20),
-			"type", "duplicated",
-			"zzz", fmt.Sprintf("%v", rand.Int31()),
-			"i", fmt.Sprintf("%v", i),
-		)
-		_, err := app.Append(0, lbls, 10, float64(i))
-		require.NoError(t, err)
-		_, err = app2.Append(0, lbls, 11, float64(i+1))
-		require.NoError(t, err)
+		for j := 0; j < 2; j++ {
+			app := storages[int(rand.Int31())%len(storages)].Appender(ctx)
+			lbls := labels.FromStrings(
+				labels.MetricName, name,
+				"type", "duplicated",
+				"zzz", zzz,
+				"i", fmt.Sprintf("%v", i),
+			)
+
+			_, err := app.Append(0, lbls, int64(j), float64(i))
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+		}
 		totalSeries++
 	}
 
-	require.NoError(t, app.Commit())
-	require.NoError(t, app2.Commit())
-
-	h := st.Head()
-	h2 := st2.Head()
 	// lets sort first by `zzz` as its not the default sorting on TSDB
 	shards, err := ConvertTSDBBlock(
 		ctx,
 		bkt,
 		0,
 		time.Minute.Milliseconds(),
-		[]Convertible{h2, h},
+		heads,
 		WithColDuration(time.Minute*10),
 		WithSortBy("zzz", labels.MetricName),
 		WithColumnPageBuffers(parquet.NewFileBufferPool(t.TempDir(), "buffers.*")),
@@ -339,7 +333,7 @@ func Test_SortedLabels(t *testing.T) {
 
 	series, chunks, err := readSeries(t, lf, cf)
 	require.NoError(t, err)
-	require.Len(t, series, totalSeries)
+	require.Equal(t, len(series), totalSeries, "series count mismatch")
 
 	for i := 0; i < len(series)-1; i++ {
 		require.LessOrEqual(t, series[i].Get("zzz"), series[i+1].Get("zzz"))
@@ -358,7 +352,7 @@ func Test_SortedLabels(t *testing.T) {
 			totalSamples++
 		}
 
-		require.Equal(t, expectedSamples, totalSamples)
+		require.Equal(t, expectedSamples, totalSamples, "series", series[i])
 
 		require.NoError(t, st.Err())
 	}
