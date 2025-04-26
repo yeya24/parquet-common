@@ -119,6 +119,121 @@ func TestEqual(t *testing.T) {
 							{from: 5, count: 2},
 						},
 					},
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(7)), Not(Equal("B", parquet.ValueOf(1))),
+						},
+						expect: []rowRange{
+							{from: 2, count: 1},
+						},
+					},
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(7)), Not(Equal("C", parquet.ValueOf("c"))),
+						},
+						expect: []rowRange{
+							{from: 5, count: 2},
+						},
+					},
+					{
+						constraints: []Constraint{
+							Not(Equal("A", parquet.ValueOf(227))),
+						},
+						expect: []rowRange{
+							{from: 0, count: 8},
+						},
+					},
+				},
+			},
+			{
+				rows: []s{
+					{A: 1, B: 2},
+					{A: 1, B: 3},
+					{A: 1, B: 4},
+					{A: 1, B: 4},
+					{A: 1, B: 5},
+					{A: 1, B: 5},
+					{A: 2, B: 5},
+					{A: 2, B: 5},
+					{A: 2, B: 5},
+					{A: 3, B: 5},
+					{A: 3, B: 6},
+					{A: 3, B: 2},
+				},
+				expectations: []expectation{
+					{
+						constraints: []Constraint{
+							Not(Equal("A", parquet.ValueOf(3))),
+						},
+						expect: []rowRange{
+							{from: 0, count: 9},
+						},
+					},
+					{
+						constraints: []Constraint{
+							Not(Equal("A", parquet.ValueOf(3))),
+							Equal("B", parquet.ValueOf(5)),
+						},
+						expect: []rowRange{
+							{from: 4, count: 5},
+						},
+					},
+					{
+						constraints: []Constraint{
+							Not(Equal("A", parquet.ValueOf(3))),
+							Not(Equal("A", parquet.ValueOf(1))),
+						},
+						expect: []rowRange{
+							{from: 6, count: 3},
+						},
+					},
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(2)),
+							Not(Equal("B", parquet.ValueOf(5))),
+						},
+						expect: []rowRange{},
+					},
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(2)),
+							Not(Equal("B", parquet.ValueOf(5))),
+						},
+						expect: []rowRange{},
+					},
+					{
+						constraints: []Constraint{
+							Equal("A", parquet.ValueOf(3)),
+							Not(Equal("B", parquet.ValueOf(2))),
+						},
+						expect: []rowRange{
+							{from: 9, count: 2},
+						},
+					},
+				},
+			},
+			{
+				rows: []s{
+					{A: 1, B: 1},
+					{A: 1, B: 2},
+					{A: 2, B: 1},
+					{A: 2, B: 2},
+					{A: 1, B: 1},
+					{A: 1, B: 2},
+					{A: 2, B: 1},
+					{A: 2, B: 2},
+				},
+				expectations: []expectation{
+					{
+						constraints: []Constraint{
+							Not(Equal("A", parquet.ValueOf(1))),
+							Not(Equal("B", parquet.ValueOf(2))),
+						},
+						expect: []rowRange{
+							{from: 2, count: 1},
+							{from: 6, count: 1},
+						},
+					},
 				},
 			},
 		} {

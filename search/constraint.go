@@ -52,7 +52,7 @@ func filter(rg parquet.RowGroup, cs ...Constraint) ([]rowRange, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unable to filter with constraint %d: %w", i, err)
 		}
-		rr = intersectRowRanges(rr, srr)
+		rr = srr
 	}
 	return rr, nil
 }
@@ -195,7 +195,7 @@ func (ec *equalConstraint) filter(rg parquet.RowGroup, primary bool, rr []rowRan
 		// ideally we cut it down a little because chunk pages are pretty small
 		n := int(pg.NumRows())
 		bl := int(max(pfrom, from) - pfrom)
-		br := n - int(pto-min(pto, to)) - 1
+		br := n - int(pto-min(pto, to))
 		var l, r int
 		switch {
 		case cidx.IsAscending() && primary:
@@ -207,7 +207,7 @@ func (ec *equalConstraint) filter(rg parquet.RowGroup, primary bool, rr []rowRan
 			}
 		default:
 			off, count := bl, 0
-			for j := bl; j <= br; j++ {
+			for j := bl; j < br; j++ {
 				if ec.comp(ec.val, symbols.Get(j)) != 0 {
 					if count != 0 {
 						res = append(res, rowRange{pfrom + int64(off), int64(count)})
@@ -265,9 +265,33 @@ func (ec *equalConstraint) skipByDictionary(pg parquet.Page) bool {
 		return false
 	}
 	for i := 0; i != d.Len(); i++ {
-		if ec.comp(ec.val, pg.Dictionary().Index(int32(i))) == 0 {
+		if ec.comp(ec.val, d.Index(int32(i))) == 0 {
 			return false
 		}
 	}
 	return true
+}
+
+func Not(c Constraint) Constraint {
+	return &notConstraint{c: c}
+}
+
+type notConstraint struct {
+	c Constraint
+}
+
+func (nc *notConstraint) filter(rg parquet.RowGroup, primary bool, rr []rowRange) ([]rowRange, error) {
+	base, err := nc.c.filter(rg, primary, rr)
+	if err != nil {
+		return nil, fmt.Errorf("unable to compute child constraint: %w", err)
+	}
+	return complementRowRanges(base, rr), nil
+}
+
+func (nc *notConstraint) init(s *parquet.Schema) error {
+	return nc.c.init(s)
+}
+
+func (nc *notConstraint) path() string {
+	return nc.c.path()
 }
