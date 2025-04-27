@@ -83,7 +83,49 @@ func TestIntersect(t *testing.T) {
 	} {
 		t.Run("", func(t *testing.T) {
 			if res := intersectRowRanges(tt.lhs, tt.rhs); !slices.Equal(res, tt.expect) {
-				t.Fatalf("Expected %q to match %q", res, tt.expect)
+				t.Fatalf("Expected %v to match %v", res, tt.expect)
+			}
+		})
+	}
+}
+
+// TODO: more testcases
+func TestComplement(t *testing.T) {
+	for _, tt := range []struct{ lhs, rhs, expect []rowRange }{
+		{
+			lhs:    []rowRange{{from: 4, count: 3}},
+			rhs:    []rowRange{{from: 2, count: 1}, {from: 5, count: 2}},
+			expect: []rowRange{{from: 2, count: 1}},
+		},
+		{
+			lhs:    []rowRange{{from: 2, count: 4}},
+			rhs:    []rowRange{{from: 0, count: 7}},
+			expect: []rowRange{{from: 0, count: 2}, {from: 6, count: 1}},
+		},
+		{
+			lhs:    []rowRange{{from: 2, count: 4}},
+			rhs:    []rowRange{{from: 3, count: 7}},
+			expect: []rowRange{{from: 6, count: 4}},
+		},
+		{
+			lhs:    []rowRange{{from: 8, count: 10}},
+			rhs:    []rowRange{{from: 3, count: 7}},
+			expect: []rowRange{{from: 3, count: 5}},
+		},
+		{
+			lhs:    []rowRange{{from: 16, count: 10}},
+			rhs:    []rowRange{{from: 3, count: 7}},
+			expect: []rowRange{{from: 3, count: 7}},
+		},
+		{
+			lhs:    []rowRange{{from: 1, count: 2}, {from: 4, count: 2}},
+			rhs:    []rowRange{{from: 2, count: 2}, {from: 5, count: 8}},
+			expect: []rowRange{{from: 3, count: 1}, {from: 6, count: 7}},
+		},
+	} {
+		t.Run("", func(t *testing.T) {
+			if res := complementRowRanges(tt.lhs, tt.rhs); !slices.Equal(res, tt.expect) {
+				t.Fatalf("Expected %v to match %v", res, tt.expect)
 			}
 		})
 	}

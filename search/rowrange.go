@@ -44,6 +44,57 @@ func intersectRowRanges(lhs, rhs []rowRange) []rowRange {
 			r++
 		}
 	}
+	return simplify(res)
+}
+
+// complement returns the complement of lhs inside rhs.
+// it assumes that lhs and rhs are simplified and returns a simplified result.
+// it operates in o(l+r) time by cursoring through ranges with a two pointer approach.
+func complementRowRanges(lhs, rhs []rowRange) []rowRange {
+	res := make([]rowRange, 0)
+
+	l, r := 0, 0
+	for l < len(lhs) && r < len(rhs) {
+		al, bl := lhs[l].from, lhs[l].from+lhs[l].count
+		ar, br := rhs[r].from, rhs[r].from+rhs[r].count
+
+		// check if rows intersect
+		switch {
+		case al > br || ar > bl:
+			// no intersection, advance cursor that ends first
+			if bl <= br {
+				l++
+			} else {
+				res = append(res, rowRange{from: ar, count: br - ar})
+				r++
+			}
+		case al < ar && bl > br:
+			// l contains r, complement of l in r is empty, advance r
+			r++
+		case al < ar && bl <= br:
+			// l covers r from left but has room on top
+			oe := min(bl, br)
+			rhs[r].from += oe - ar
+			rhs[r].count -= oe - ar
+			l++
+		case al >= ar && bl > br:
+			// l covers r from right but has room on bottom
+			os := max(al, ar)
+			res = append(res, rowRange{from: ar, count: os - ar})
+			r++
+		case al >= ar && bl <= br:
+			// l is included r
+			os, oe := max(al, ar), min(bl, br)
+			res = append(res, rowRange{from: rhs[r].from, count: os - rhs[r].from})
+			rhs[r].from = oe
+			rhs[r].count = br - oe
+			l++
+		}
+	}
+
+	for ; r < len(rhs); r++ {
+		res = append(res, rhs[r])
+	}
 
 	return simplify(res)
 }
