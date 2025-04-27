@@ -89,7 +89,6 @@ func TestIntersect(t *testing.T) {
 	}
 }
 
-// TODO: more testcases
 func TestComplement(t *testing.T) {
 	for _, tt := range []struct{ lhs, rhs, expect []rowRange }{
 		{
@@ -121,6 +120,52 @@ func TestComplement(t *testing.T) {
 			lhs:    []rowRange{{from: 1, count: 2}, {from: 4, count: 2}},
 			rhs:    []rowRange{{from: 2, count: 2}, {from: 5, count: 8}},
 			expect: []rowRange{{from: 3, count: 1}, {from: 6, count: 7}},
+		},
+		// Empty input cases
+		{
+			lhs:    []rowRange{},
+			rhs:    []rowRange{{from: 1, count: 5}},
+			expect: []rowRange{{from: 1, count: 5}},
+		},
+		{
+			lhs:    []rowRange{{from: 1, count: 5}},
+			rhs:    []rowRange{},
+			expect: []rowRange{},
+		},
+		{
+			lhs:    []rowRange{},
+			rhs:    []rowRange{},
+			expect: []rowRange{},
+		},
+		// Adjacent ranges
+		{
+			lhs:    []rowRange{{from: 1, count: 3}},
+			rhs:    []rowRange{{from: 1, count: 3}, {from: 4, count: 2}},
+			expect: []rowRange{{from: 4, count: 2}},
+		},
+		// Ranges with gaps
+		{
+			lhs:    []rowRange{{from: 1, count: 2}, {from: 5, count: 2}},
+			rhs:    []rowRange{{from: 0, count: 8}},
+			expect: []rowRange{{from: 0, count: 1}, {from: 3, count: 2}, {from: 7, count: 1}},
+		},
+		// Zero-count ranges
+		{
+			lhs:    []rowRange{{from: 1, count: 0}},
+			rhs:    []rowRange{{from: 1, count: 5}},
+			expect: []rowRange{{from: 1, count: 5}},
+		},
+		// Completely disjoint ranges
+		{
+			lhs:    []rowRange{{from: 1, count: 2}},
+			rhs:    []rowRange{{from: 5, count: 2}},
+			expect: []rowRange{{from: 5, count: 2}},
+		},
+		// Multiple overlapping ranges
+		{
+			lhs:    []rowRange{{from: 1, count: 3}, {from: 4, count: 3}, {from: 8, count: 2}},
+			rhs:    []rowRange{{from: 0, count: 11}},
+			expect: []rowRange{{from: 0, count: 1}, {from: 7, count: 1}, {from: 10, count: 1}},
 		},
 	} {
 		t.Run("", func(t *testing.T) {

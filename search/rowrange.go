@@ -47,9 +47,16 @@ func intersectRowRanges(lhs, rhs []rowRange) []rowRange {
 	return simplify(res)
 }
 
-// complement returns the complement of lhs inside rhs.
-// it assumes that lhs and rhs are simplified and returns a simplified result.
-// it operates in o(l+r) time by cursoring through ranges with a two pointer approach.
+// complementRowRanges returns the ranges that are in rhs but not in lhs.
+// For example, if you have:
+// lhs: [{from: 1, count: 3}]  // represents rows 1,2,3
+// rhs: [{from: 0, count: 5}]  // represents rows 0,1,2,3,4
+// The complement would be [{from: 0, count: 1}, {from: 4, count: 1}]  // represents rows 0,4
+// because these are the rows in rhs that are not in lhs.
+//
+// The function assumes that lhs and rhs are simplified (no overlapping ranges)
+// and returns a simplified result. It operates in O(l+r) time by using a two-pointer approach
+// to efficiently process both ranges.
 func complementRowRanges(lhs, rhs []rowRange) []rowRange {
 	res := make([]rowRange, 0)
 
