@@ -295,3 +295,21 @@ func (nc *notConstraint) init(s *parquet.Schema) error {
 func (nc *notConstraint) path() string {
 	return nc.c.path()
 }
+
+type nullConstraint struct{}
+
+func Null() Constraint {
+	return &nullConstraint{}
+}
+
+func (null *nullConstraint) filter(parquet.RowGroup, bool, []rowRange) ([]rowRange, error) {
+	return nil, nil
+}
+
+func (null *nullConstraint) init(_ *parquet.Schema) error {
+	return nil
+}
+
+func (null *nullConstraint) path() string {
+	return ""
+}
