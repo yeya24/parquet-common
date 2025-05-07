@@ -73,8 +73,8 @@ func NewMaterializer(s *schema.TSDBSchema, d *schema.PrometheusParquetChunksDeco
 
 // Materialize reconstructs the ChunkSeries that belong to the specified row ranges (rr).
 // It uses the row group index (rgi) and time bounds (mint, maxt) to filter and decode the series.
-func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int64, rr []RowRange) ([]storage.ChunkSeries, error) {
-	sLbls, err := m.materializeLabels(ctx, rgi, rr)
+func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int64, skipChunks bool, rr []RowRange) ([]storage.ChunkSeries, error) {
+	sLbls, err := m.materializeAllLabels(ctx, rgi, rr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error materializing labels")
 	}
@@ -87,19 +87,109 @@ func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int6
 		}
 	}
 
-	chks, err := m.materializeChunks(ctx, rgi, mint, maxt, rr)
-	if err != nil {
-		return nil, errors.Wrap(err, "materializer failed to materialize chunks")
-	}
+	if !skipChunks {
+		chks, err := m.materializeChunks(ctx, rgi, mint, maxt, rr)
+		if err != nil {
+			return nil, errors.Wrap(err, "materializer failed to materialize chunks")
+		}
 
-	for i, result := range results {
-		result.(*concreteChunksSeries).chks = chks[i]
+		for i, result := range results {
+			result.(*concreteChunksSeries).chks = chks[i]
+		}
 	}
-
 	return results, err
 }
 
-func (m *Materializer) materializeLabels(ctx context.Context, rgi int, rr []RowRange) ([]labels.Labels, error) {
+func (m *Materializer) MaterializeAllLabelNames() []string {
+	r := make([]string, 0, len(m.lf.Schema().Columns()))
+	for _, c := range m.lf.Schema().Columns() {
+		lbl, ok := schema.ExtractLabelFromColumn(c[0])
+		if !ok {
+			continue
+		}
+
+		r = append(r, lbl)
+	}
+	return r
+}
+
+func (m *Materializer) MaterializeLabelNames(ctx context.Context, rgi int, rr []RowRange) ([]string, error) {
+	labelsRg := m.lf.RowGroups()[rgi]
+	cc := labelsRg.ColumnChunks()[m.colIdx]
+	colsIdxs, err := m.materializeColumn(ctx, labelsRg, cc, rr)
+	if err != nil {
+		return nil, errors.Wrap(err, "materializer failed to materialize columns")
+	}
+
+	colsMap := make(map[string]struct{}, 10)
+
+	for _, colsIdx := range colsIdxs {
+		idxs, err := schema.DecodeUintSlice(colsIdx.ByteArray())
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to decode column index")
+		}
+		for _, idx := range idxs {
+			if _, ok := colsMap[m.lf.Schema().Columns()[idx][0]]; !ok {
+				colsMap[m.lf.Schema().Columns()[idx][0]] = struct{}{}
+			}
+		}
+	}
+	lbls := make([]string, 0, len(colsMap))
+	for col := range colsMap {
+		l, ok := schema.ExtractLabelFromColumn(col)
+		if !ok {
+			return nil, errors.New(fmt.Sprintf("error extracting label name from col %v", col))
+		}
+		lbls = append(lbls, l)
+	}
+	return lbls, nil
+}
+
+func (m *Materializer) MaterializeLabelValues(ctx context.Context, name string, rgi int, rr []RowRange) ([]string, error) {
+	labelsRg := m.lf.RowGroups()[rgi]
+	cIdx, ok := m.lf.Schema().Lookup(schema.LabelToColumn(name))
+	if !ok {
+		return []string{}, nil
+	}
+	cc := labelsRg.ColumnChunks()[cIdx.ColumnIndex]
+	values, err := m.materializeColumn(ctx, labelsRg, cc, rr)
+	if err != nil {
+		return nil, errors.Wrap(err, "materializer failed to materialize columns")
+	}
+
+	r := make([]string, 0, len(values))
+	vMap := make(map[string]struct{}, 10)
+	for _, v := range values {
+		if _, ok := vMap[util.YoloString(v.ByteArray())]; !ok {
+			r = append(r, v.String())
+			vMap[util.YoloString(v.ByteArray())] = struct{}{}
+		}
+	}
+	return r, nil
+}
+
+func (m *Materializer) MaterializeAllLabelValues(ctx context.Context, name string, rgi int) ([]string, error) {
+	labelsRg := m.lf.RowGroups()[rgi]
+	cIdx, ok := m.lf.Schema().Lookup(schema.LabelToColumn(name))
+	if !ok {
+		return []string{}, nil
+	}
+	cc := labelsRg.ColumnChunks()[cIdx.ColumnIndex]
+	pages := m.getPage(ctx, cc)
+	p, err := pages.ReadPage()
+	if err != nil {
+		return []string{}, errors.Wrap(err, "failed to read page")
+	}
+	defer parquet.Release(p)
+
+	r := make([]string, 0, p.Dictionary().Len())
+	for i := 0; i < p.Dictionary().Len(); i++ {
+		r = append(r, p.Dictionary().Index(int32(i)).String())
+	}
+	return r, nil
+}
+
+func (m *Materializer) materializeAllLabels(ctx context.Context, rgi int, rr []RowRange) ([]labels.Labels, error) {
 	labelsRg := m.lf.RowGroups()[rgi]
 	cc := labelsRg.ColumnChunks()[m.colIdx]
 	colsIdxs, err := m.materializeColumn(ctx, labelsRg, cc, rr)
@@ -288,7 +378,7 @@ func (m *Materializer) materializeColumn(ctx context.Context, group parquet.RowG
 	return values, err
 }
 
-func (pr *Materializer) getPage(_ context.Context, cc parquet.ColumnChunk) *parquet.FilePages {
+func (m *Materializer) getPage(_ context.Context, cc parquet.ColumnChunk) *parquet.FilePages {
 	// TODO: pass the context to the reader
 	colChunk := cc.(*parquet.FileColumnChunk)
 	pages := colChunk.PagesFrom(colChunk.File())
