@@ -24,19 +24,19 @@ import (
 	"github.com/efficientgo/core/errors"
 	"github.com/parquet-go/parquet-go"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/storage"
+	prom_storage "github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/prometheus-community/parquet-common/schema"
+	"github.com/prometheus-community/parquet-common/storage"
 	"github.com/prometheus-community/parquet-common/util"
 )
 
 type Materializer struct {
-	lf *parquet.File
-	cf *parquet.File
-	s  *schema.TSDBSchema
-	d  *schema.PrometheusParquetChunksDecoder
+	b *storage.ParquetShard
+	s *schema.TSDBSchema
+	d *schema.PrometheusParquetChunksDecoder
 
 	colIdx      int
 	concurrency int
@@ -44,15 +44,15 @@ type Materializer struct {
 	dataColToIndex []int
 }
 
-func NewMaterializer(s *schema.TSDBSchema, d *schema.PrometheusParquetChunksDecoder, lf, cf *parquet.File) (*Materializer, error) {
-	colIdx, ok := lf.Schema().Lookup(schema.ColIndexes)
+func NewMaterializer(s *schema.TSDBSchema, d *schema.PrometheusParquetChunksDecoder, block *storage.ParquetShard) (*Materializer, error) {
+	colIdx, ok := block.LabelsFile().Schema().Lookup(schema.ColIndexes)
 	if !ok {
 		return nil, errors.New(fmt.Sprintf("schema index %s not found", schema.ColIndexes))
 	}
 
-	dataColToIndex := make([]int, len(cf.Schema().Columns()))
+	dataColToIndex := make([]int, len(block.ChunksFile().Schema().Columns()))
 	for i := 0; i < len(s.DataColsIndexes); i++ {
-		c, ok := cf.Schema().Lookup(schema.DataColumn(i))
+		c, ok := block.ChunksFile().Schema().Lookup(schema.DataColumn(i))
 		if !ok {
 			return nil, errors.New(fmt.Sprintf("schema column %s not found", schema.DataColumn(i)))
 		}
@@ -63,8 +63,7 @@ func NewMaterializer(s *schema.TSDBSchema, d *schema.PrometheusParquetChunksDeco
 	return &Materializer{
 		s:              s,
 		d:              d,
-		lf:             lf,
-		cf:             cf,
+		b:              block,
 		colIdx:         colIdx.ColumnIndex,
 		concurrency:    runtime.GOMAXPROCS(0),
 		dataColToIndex: dataColToIndex,
@@ -73,13 +72,13 @@ func NewMaterializer(s *schema.TSDBSchema, d *schema.PrometheusParquetChunksDeco
 
 // Materialize reconstructs the ChunkSeries that belong to the specified row ranges (rr).
 // It uses the row group index (rgi) and time bounds (mint, maxt) to filter and decode the series.
-func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int64, skipChunks bool, rr []RowRange) ([]storage.ChunkSeries, error) {
+func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int64, skipChunks bool, rr []RowRange) ([]prom_storage.ChunkSeries, error) {
 	sLbls, err := m.materializeAllLabels(ctx, rgi, rr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error materializing labels")
 	}
 
-	results := make([]storage.ChunkSeries, len(sLbls))
+	results := make([]prom_storage.ChunkSeries, len(sLbls))
 	for i, s := range sLbls {
 		sort.Sort(s)
 		results[i] = &concreteChunksSeries{
@@ -98,7 +97,7 @@ func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int6
 		}
 
 		// If we are not skipping chunks and there is no chunks for the time range queried, lets remove the series
-		results = slices.DeleteFunc(results, func(cs storage.ChunkSeries) bool {
+		results = slices.DeleteFunc(results, func(cs prom_storage.ChunkSeries) bool {
 			return len(cs.(*concreteChunksSeries).chks) == 0
 		})
 	}
@@ -106,8 +105,8 @@ func (m *Materializer) Materialize(ctx context.Context, rgi int, mint, maxt int6
 }
 
 func (m *Materializer) MaterializeAllLabelNames() []string {
-	r := make([]string, 0, len(m.lf.Schema().Columns()))
-	for _, c := range m.lf.Schema().Columns() {
+	r := make([]string, 0, len(m.b.LabelsFile().Schema().Columns()))
+	for _, c := range m.b.LabelsFile().Schema().Columns() {
 		lbl, ok := schema.ExtractLabelFromColumn(c[0])
 		if !ok {
 			continue
@@ -119,9 +118,9 @@ func (m *Materializer) MaterializeAllLabelNames() []string {
 }
 
 func (m *Materializer) MaterializeLabelNames(ctx context.Context, rgi int, rr []RowRange) ([]string, error) {
-	labelsRg := m.lf.RowGroups()[rgi]
+	labelsRg := m.b.LabelsFile().RowGroups()[rgi]
 	cc := labelsRg.ColumnChunks()[m.colIdx]
-	colsIdxs, err := m.materializeColumn(ctx, labelsRg, cc, rr)
+	colsIdxs, err := m.materializeColumn(ctx, m.b.LabelsFile(), labelsRg, cc, rr)
 	if err != nil {
 		return nil, errors.Wrap(err, "materializer failed to materialize columns")
 	}
@@ -136,8 +135,8 @@ func (m *Materializer) MaterializeLabelNames(ctx context.Context, rgi int, rr []
 				return nil, errors.Wrap(err, "failed to decode column index")
 			}
 			for _, idx := range idxs {
-				if _, ok := colsMap[m.lf.Schema().Columns()[idx][0]]; !ok {
-					colsMap[m.lf.Schema().Columns()[idx][0]] = struct{}{}
+				if _, ok := colsMap[m.b.LabelsFile().Schema().Columns()[idx][0]]; !ok {
+					colsMap[m.b.LabelsFile().Schema().Columns()[idx][0]] = struct{}{}
 				}
 			}
 		}
@@ -154,13 +153,13 @@ func (m *Materializer) MaterializeLabelNames(ctx context.Context, rgi int, rr []
 }
 
 func (m *Materializer) MaterializeLabelValues(ctx context.Context, name string, rgi int, rr []RowRange) ([]string, error) {
-	labelsRg := m.lf.RowGroups()[rgi]
-	cIdx, ok := m.lf.Schema().Lookup(schema.LabelToColumn(name))
+	labelsRg := m.b.LabelsFile().RowGroups()[rgi]
+	cIdx, ok := m.b.LabelsFile().Schema().Lookup(schema.LabelToColumn(name))
 	if !ok {
 		return []string{}, nil
 	}
 	cc := labelsRg.ColumnChunks()[cIdx.ColumnIndex]
-	values, err := m.materializeColumn(ctx, labelsRg, cc, rr)
+	values, err := m.materializeColumn(ctx, m.b.LabelsFile(), labelsRg, cc, rr)
 	if err != nil {
 		return nil, errors.Wrap(err, "materializer failed to materialize columns")
 	}
@@ -178,13 +177,13 @@ func (m *Materializer) MaterializeLabelValues(ctx context.Context, name string, 
 }
 
 func (m *Materializer) MaterializeAllLabelValues(ctx context.Context, name string, rgi int) ([]string, error) {
-	labelsRg := m.lf.RowGroups()[rgi]
-	cIdx, ok := m.lf.Schema().Lookup(schema.LabelToColumn(name))
+	labelsRg := m.b.LabelsFile().RowGroups()[rgi]
+	cIdx, ok := m.b.LabelsFile().Schema().Lookup(schema.LabelToColumn(name))
 	if !ok {
 		return []string{}, nil
 	}
 	cc := labelsRg.ColumnChunks()[cIdx.ColumnIndex]
-	pages := m.getPage(ctx, cc)
+	pages := m.b.LabelsFile().GetPages(ctx, cc)
 	p, err := pages.ReadPage()
 	if err != nil {
 		return []string{}, errors.Wrap(err, "failed to read page")
@@ -199,9 +198,9 @@ func (m *Materializer) MaterializeAllLabelValues(ctx context.Context, name strin
 }
 
 func (m *Materializer) materializeAllLabels(ctx context.Context, rgi int, rr []RowRange) ([]labels.Labels, error) {
-	labelsRg := m.lf.RowGroups()[rgi]
+	labelsRg := m.b.LabelsFile().RowGroups()[rgi]
 	cc := labelsRg.ColumnChunks()[m.colIdx]
-	colsIdxs, err := m.materializeColumn(ctx, labelsRg, cc, rr)
+	colsIdxs, err := m.materializeColumn(ctx, m.b.LabelsFile(), labelsRg, cc, rr)
 	if err != nil {
 		return nil, errors.Wrap(err, "materializer failed to materialize columns")
 	}
@@ -226,7 +225,7 @@ func (m *Materializer) materializeAllLabels(ctx context.Context, rgi int, rr []R
 	for cIdx, v := range colsMap {
 		errGroup.Go(func() error {
 			cc := labelsRg.ColumnChunks()[cIdx]
-			values, err := m.materializeColumn(ctx, labelsRg, cc, rr)
+			values, err := m.materializeColumn(ctx, m.b.LabelsFile(), labelsRg, cc, rr)
 			if err != nil {
 				return errors.Wrap(err, "failed to materialize labels values")
 			}
@@ -240,7 +239,7 @@ func (m *Materializer) materializeAllLabels(ctx context.Context, rgi int, rr []R
 	}
 
 	for cIdx, values := range colsMap {
-		labelName, ok := schema.ExtractLabelFromColumn(m.lf.Schema().Columns()[cIdx][0])
+		labelName, ok := schema.ExtractLabelFromColumn(m.b.LabelsFile().Schema().Columns()[cIdx][0])
 		if !ok {
 			return nil, fmt.Errorf("column %d not found in schema", cIdx)
 		}
@@ -261,7 +260,7 @@ func (m *Materializer) materializeAllLabels(ctx context.Context, rgi int, rr []R
 func (m *Materializer) materializeChunks(ctx context.Context, rgi int, mint, maxt int64, rr []RowRange) ([][]chunks.Meta, error) {
 	minDataCol := m.s.DataColumIdx(mint)
 	maxDataCol := m.s.DataColumIdx(maxt)
-	rg := m.cf.RowGroups()[rgi]
+	rg := m.b.ChunksFile().RowGroups()[rgi]
 	totalRows := int64(0)
 	for _, r := range rr {
 		totalRows += r.count
@@ -269,7 +268,7 @@ func (m *Materializer) materializeChunks(ctx context.Context, rgi int, mint, max
 	r := make([][]chunks.Meta, totalRows)
 
 	for i := minDataCol; i <= min(maxDataCol, len(m.dataColToIndex)-1); i++ {
-		values, err := m.materializeColumn(ctx, rg, rg.ColumnChunks()[m.dataColToIndex[i]], rr)
+		values, err := m.materializeColumn(ctx, m.b.ChunksFile(), rg, rg.ColumnChunks()[m.dataColToIndex[i]], rr)
 		if err != nil {
 			return r, err
 		}
@@ -286,7 +285,7 @@ func (m *Materializer) materializeChunks(ctx context.Context, rgi int, mint, max
 	return r, nil
 }
 
-func (m *Materializer) materializeColumn(ctx context.Context, group parquet.RowGroup, cc parquet.ColumnChunk, rr []RowRange) ([]parquet.Value, error) {
+func (m *Materializer) materializeColumn(ctx context.Context, file *storage.ParquetFile, group parquet.RowGroup, cc parquet.ColumnChunk, rr []RowRange) ([]parquet.Value, error) {
 	if len(rr) == 0 {
 		return nil, nil
 	}
@@ -330,7 +329,7 @@ func (m *Materializer) materializeColumn(ctx context.Context, group parquet.RowG
 
 	for _, p := range coalescePageRanges(pagesToRowsMap, oidx) {
 		errGroup.Go(func() error {
-			pgs := m.getPage(ctx, cc)
+			pgs := file.GetPages(ctx, cc)
 			defer func() { _ = pgs.Close() }()
 			err := pgs.SeekToRow(p.rows[0].from)
 			if err != nil {
@@ -385,13 +384,6 @@ func (m *Materializer) materializeColumn(ctx context.Context, group parquet.RowG
 		values = append(values, r[v]...)
 	}
 	return values, err
-}
-
-func (m *Materializer) getPage(_ context.Context, cc parquet.ColumnChunk) *parquet.FilePages {
-	// TODO: pass the context to the reader
-	colChunk := cc.(*parquet.FileColumnChunk)
-	pages := colChunk.PagesFrom(colChunk.File())
-	return pages
 }
 
 type pageEntryRead struct {
@@ -503,7 +495,7 @@ func (vi *valuesIterator) At() parquet.Value {
 	return vi.buffer[vi.currentBufferIndex].Clone()
 }
 
-var _ storage.ChunkSeries = &concreteChunksSeries{}
+var _ prom_storage.ChunkSeries = &concreteChunksSeries{}
 
 type concreteChunksSeries struct {
 	lbls labels.Labels
@@ -515,5 +507,5 @@ func (c concreteChunksSeries) Labels() labels.Labels {
 }
 
 func (c concreteChunksSeries) Iterator(_ chunks.Iterator) chunks.Iterator {
-	return storage.NewListChunkSeriesIterator(c.chks...)
+	return prom_storage.NewListChunkSeriesIterator(c.chks...)
 }

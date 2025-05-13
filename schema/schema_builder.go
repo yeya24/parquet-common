@@ -18,6 +18,7 @@ import (
 	"strconv"
 
 	"github.com/efficientgo/core/errors"
+
 	"github.com/parquet-go/parquet-go"
 )
 

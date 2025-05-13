@@ -21,11 +21,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/parquet-go/parquet-go"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/promqltest"
-	"github.com/prometheus/prometheus/storage"
+	prom_storage "github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
@@ -33,6 +32,7 @@ import (
 	"github.com/thanos-io/objstore/providers/filesystem"
 
 	"github.com/prometheus-community/parquet-common/schema"
+	"github.com/prometheus-community/parquet-common/storage"
 )
 
 func TestPromQLAcceptance(t *testing.T) {
@@ -53,7 +53,7 @@ func TestPromQLAcceptance(t *testing.T) {
 	engine := promql.NewEngine(opts)
 	t.Cleanup(func() { _ = engine.Close() })
 
-	promqltest.RunBuiltinTestsWithStorage(&parallelTest{T: t}, engine, func(tt testutil.T) storage.Storage {
+	promqltest.RunBuiltinTestsWithStorage(&parallelTest{T: t}, engine, func(tt testutil.T) prom_storage.Storage {
 		return &acceptanceTestStorage{t: t, st: teststorage.New(tt)}
 	})
 }
@@ -74,15 +74,15 @@ type acceptanceTestStorage struct {
 	st *teststorage.TestStorage
 }
 
-func (st *acceptanceTestStorage) Appender(ctx context.Context) storage.Appender {
+func (st *acceptanceTestStorage) Appender(ctx context.Context) prom_storage.Appender {
 	return st.st.Appender(ctx)
 }
 
-func (st *acceptanceTestStorage) ChunkQuerier(int64, int64) (storage.ChunkQuerier, error) {
+func (st *acceptanceTestStorage) ChunkQuerier(int64, int64) (prom_storage.ChunkQuerier, error) {
 	return nil, errors.New("unimplemented")
 }
 
-func (st *acceptanceTestStorage) Querier(from, to int64) (storage.Querier, error) {
+func (st *acceptanceTestStorage) Querier(from, to int64) (prom_storage.Querier, error) {
 	if st.st.Head().NumSeries() == 0 {
 		// parquet-go panics when writing an empty parquet file
 		return st.st.Querier(from, to)
@@ -95,9 +95,9 @@ func (st *acceptanceTestStorage) Querier(from, to int64) (storage.Querier, error
 
 	h := st.st.Head()
 	data := testData{minTime: h.MinTime(), maxTime: h.MaxTime()}
-	lf, cf := convertToParquet(st.t, context.Background(), bkt, data, h)
+	block := convertToParquet(st.t, context.Background(), bkt, data, h)
 
-	q, err := createQueryable(st.t, lf, cf)
+	q, err := createQueryable(block)
 	if err != nil {
 		st.t.Fatalf("unable to create queryable: %s", err)
 	}
@@ -128,11 +128,11 @@ func TestQueryable(t *testing.T) {
 	require.NoError(t, err)
 
 	// Convert to Parquet
-	lf, cf := convertToParquet(t, ctx, bkt, data, st.Head())
+	shard := convertToParquet(t, ctx, bkt, data, st.Head())
 
 	t.Run("QueryByUniqueLabel", func(t *testing.T) {
 		matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "unique", "unique_0")}
-		sFound := queryWithQueryable(t, data.minTime, data.maxTime, lf, cf, nil, matchers...)
+		sFound := queryWithQueryable(t, data.minTime, data.maxTime, shard, nil, matchers...)
 		totalFound := 0
 		for _, series := range sFound {
 			require.Equal(t, series.Labels().Get("unique"), "unique_0")
@@ -146,7 +146,7 @@ func TestQueryable(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			name := fmt.Sprintf("metric_%d", rand.Int()%cfg.totalMetricNames)
 			matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, name)}
-			sFound := queryWithQueryable(t, data.minTime, data.maxTime, lf, cf, nil, matchers...)
+			sFound := queryWithQueryable(t, data.minTime, data.maxTime, shard, nil, matchers...)
 			totalFound := 0
 			for _, series := range sFound {
 				totalFound++
@@ -159,10 +159,10 @@ func TestQueryable(t *testing.T) {
 
 	t.Run("QueryByUniqueLabel and SkipChunks=true", func(t *testing.T) {
 		matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "unique", "unique_0")}
-		hints := &storage.SelectHints{
+		hints := &prom_storage.SelectHints{
 			Func: "series",
 		}
-		sFound := queryWithQueryable(t, data.minTime, data.maxTime, lf, cf, hints, matchers...)
+		sFound := queryWithQueryable(t, data.minTime, data.maxTime, shard, hints, matchers...)
 		totalFound := 0
 		for _, series := range sFound {
 			totalFound++
@@ -173,7 +173,7 @@ func TestQueryable(t *testing.T) {
 	})
 
 	t.Run("LabelNames", func(t *testing.T) {
-		queryable, err := createQueryable(t, lf, cf)
+		queryable, err := createQueryable(shard)
 		require.NoError(t, err)
 		querier, err := queryable.Querier(data.minTime, data.maxTime)
 		require.NoError(t, err)
@@ -198,7 +198,7 @@ func TestQueryable(t *testing.T) {
 	})
 
 	t.Run("LabelValues", func(t *testing.T) {
-		queryable, err := createQueryable(t, lf, cf)
+		queryable, err := createQueryable(shard)
 		require.NoError(t, err)
 		querier, err := queryable.Querier(data.minTime, data.maxTime)
 		require.NoError(t, err)
@@ -265,29 +265,29 @@ eval instant at 60s http_requests_total{route=~".+"}
 	{__name__="http_requests_total", pod="nginx-3", route="/"} 6
 `
 
-	promqltest.RunTestWithStorage(t, load, engine, func(tt testutil.T) storage.Storage {
+	promqltest.RunTestWithStorage(t, load, engine, func(tt testutil.T) prom_storage.Storage {
 		return &acceptanceTestStorage{t: t, st: teststorage.New(tt)}
 	})
 }
 
-func queryWithQueryable(t *testing.T, mint, maxt int64, lf, cf *parquet.File, hints *storage.SelectHints, matchers ...*labels.Matcher) []storage.Series {
+func queryWithQueryable(t *testing.T, mint, maxt int64, shard *storage.ParquetShard, hints *prom_storage.SelectHints, matchers ...*labels.Matcher) []prom_storage.Series {
 	ctx := context.Background()
-	queryable, err := createQueryable(t, lf, cf)
+	queryable, err := createQueryable(shard)
 	require.NoError(t, err)
 	querier, err := queryable.Querier(mint, maxt)
 	require.NoError(t, err)
 	ss := querier.Select(ctx, true, hints, matchers...)
 
-	found := make([]storage.Series, 0, 100)
+	found := make([]prom_storage.Series, 0, 100)
 	for ss.Next() {
 		found = append(found, ss.At())
 	}
 	return found
 }
 
-func createQueryable(t testing.TB, lf *parquet.File, cf *parquet.File) (storage.Queryable, error) {
+func createQueryable(shard *storage.ParquetShard) (prom_storage.Queryable, error) {
 	d := schema.NewPrometheusParquetChunksDecoder(chunkenc.NewPool())
-	pb, err := NewParquetBlock(lf, cf, d)
-	require.NoError(t, err)
-	return NewParquetQueryable(pb)
+	return NewParquetQueryable(d, func(mint, maxt int64) []*storage.ParquetShard {
+		return []*storage.ParquetShard{shard}
+	})
 }

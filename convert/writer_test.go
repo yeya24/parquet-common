@@ -30,7 +30,7 @@ import (
 	"github.com/thanos-io/objstore/providers/filesystem"
 
 	"github.com/prometheus-community/parquet-common/schema"
-	"github.com/prometheus-community/parquet-common/util"
+	"github.com/prometheus-community/parquet-common/storage"
 )
 
 func TestParquetWriter(t *testing.T) {
@@ -84,7 +84,7 @@ func TestParquetWriter(t *testing.T) {
 		labelsAttr, err := bkt.Attributes(ctx, labelsFileName)
 		require.NoError(t, err)
 
-		labelsFile, err := parquet.OpenFile(util.NewBucketReadAt(ctx, labelsFileName, bkt), labelsAttr.Size)
+		labelsFile, err := parquet.OpenFile(storage.NewBucketReadAt(ctx, labelsFileName, bkt), labelsAttr.Size)
 		require.NoError(t, err)
 
 		// Inspect row groups
@@ -117,7 +117,7 @@ func TestParquetWriter(t *testing.T) {
 		chunksAttr, err := bkt.Attributes(ctx, chunksFileName)
 		require.NoError(t, err)
 
-		chunksFile, err := parquet.OpenFile(util.NewBucketReadAt(ctx, chunksFileName, bkt), chunksAttr.Size)
+		chunksFile, err := parquet.OpenFile(storage.NewBucketReadAt(ctx, chunksFileName, bkt), chunksAttr.Size)
 		require.NoError(t, err)
 
 		// should have the same number of row groups
