@@ -102,8 +102,12 @@ func Test_Convert_TSDB(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, shards)
 
-			shard, err := storage.OpenParquetShard(ctx, bkt, DefaultConvertOpts.name, 0)
+			bucketOpener := storage.NewParquetBucketOpener(bkt)
+			shard, err := storage.NewParquetShardOpener(
+				ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, 0,
+			)
 			require.NoError(t, err)
+
 			require.Equal(t, len(shard.LabelsFile().RowGroups()), len(shard.ChunksFile().RowGroups()))
 			series, chunks, err := readSeries(t, shard)
 			require.NoError(t, err)
@@ -179,7 +183,10 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, shards)
 
-	shard, err := storage.OpenParquetShard(ctx, bkt, DefaultConvertOpts.name, 0)
+	bucketOpener := storage.NewParquetBucketOpener(bkt)
+	shard, err := storage.NewParquetShardOpener(
+		ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, 0,
+	)
 	require.NoError(t, err)
 
 	// Check metadatas
@@ -266,7 +273,10 @@ func Test_BlockHasOnlySomeSeriesInConvertTime(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, shards)
 
-	shard, err := storage.OpenParquetShard(ctx, bkt, DefaultConvertOpts.name, 0)
+	bucketOpener := storage.NewParquetBucketOpener(bkt)
+	shard, err := storage.NewParquetShardOpener(
+		ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, 0,
+	)
 	require.NoError(t, err)
 
 	series, _, err := readSeries(t, shard)
@@ -341,7 +351,10 @@ func Test_SortedLabels(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, shards)
 
-	shard, err := storage.OpenParquetShard(ctx, bkt, DefaultConvertOpts.name, 0)
+	bucketOpener := storage.NewParquetBucketOpener(bkt)
+	shard, err := storage.NewParquetShardOpener(
+		ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, 0,
+	)
 	require.NoError(t, err)
 
 	series, chunks, err := readSeries(t, shard)
@@ -371,7 +384,7 @@ func Test_SortedLabels(t *testing.T) {
 	}
 }
 
-func readSeries(t *testing.T, shard *storage.ParquetShard) ([]labels.Labels, [][]chunks.Meta, error) {
+func readSeries(t *testing.T, shard storage.ParquetShard) ([]labels.Labels, [][]chunks.Meta, error) {
 	lr := parquet.NewGenericReader[any](shard.LabelsFile().File)
 	cr := parquet.NewGenericReader[any](shard.ChunksFile().File)
 
