@@ -26,6 +26,9 @@ Expect:
 - Incomplete or unstable features
 - Minimal documentation
 
+## Benchmarks Results 
+
+* https://prometheus-community.github.io/parquet-common/dev/bench/
 
 ## Usage 
 
@@ -49,7 +52,7 @@ To convert one or more TSDB block to parquet we can just use the ConvertTSDBBloc
 ```
 ### Querying Parquet File
 
-```\go
+```go
   blockDir := "/path/to/block"
   ctx := context.Background()
 
