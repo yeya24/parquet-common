@@ -392,6 +392,14 @@ func TestFilter(t *testing.T) {
 							{From: 0, Count: 4},
 						},
 					},
+					{
+						constraints: []Constraint{
+							Regex("C", mustNewFastRegexMatcher(t, "foo|bar")),
+						},
+						expect: []RowRange{
+							{From: 0, Count: 3},
+						},
+					},
 				},
 			},
 			{

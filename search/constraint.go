@@ -500,7 +500,11 @@ func (rc *regexConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 			}
 			continue
 		}
-		// TODO: use setmatches / prefix for statistics
+		// TODO: use prefix from regex.
+		// Use set matches for statistics to potentially skip pages
+		if rc.canSkipPageByStatistics(cidx, i) {
+			continue
+		}
 
 		// We cannot discard the page through statistics but we might need to read it to see if it has the value
 		if err := pgs.SeekToRow(pfrom); err != nil {
@@ -565,6 +569,43 @@ func (rc *regexConstraint) matches(v parquet.Value) bool {
 		rc.cache[v] = accept
 	}
 	return accept
+}
+
+// canSkipPageByStatistics checks if a page can be skipped based on its min/max values
+// and the regex constraint's set of possible matches.
+func (rc *regexConstraint) canSkipPageByStatistics(cidx parquet.ColumnIndex, pageIdx int) bool {
+	// If the regex is not optimized (no fast path), we can't skip based on statistics
+	if !rc.r.IsOptimized() {
+		return false
+	}
+
+	// Get the set of strings that the regex can match
+	setMatches := rc.r.SetMatches()
+	if len(setMatches) == 0 {
+		// No set matches available, can't skip
+		return false
+	}
+
+	minv, maxv := cidx.MinValue(pageIdx), cidx.MaxValue(pageIdx)
+
+	// If either min or max is null, we can't skip (null might match empty string)
+	if minv.IsNull() || maxv.IsNull() {
+		return false
+	}
+
+	minStr := util.YoloString(minv.ByteArray())
+	maxStr := util.YoloString(maxv.ByteArray())
+
+	// Check if any string in the set matches falls within the page's value range
+	for _, match := range setMatches {
+		// If the match is within the page's min/max range, we can't skip
+		if minStr <= match && match <= maxStr {
+			return false
+		}
+	}
+
+	// No matches found in the page's range, we can skip this page
+	return true
 }
 
 func Not(c Constraint) Constraint {
