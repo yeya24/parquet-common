@@ -260,6 +260,33 @@ func (s *SymbolTable) Reset(pg parquet.Page) {
 	s.dict = dict
 }
 
+func (s *SymbolTable) ResetWithRange(pg parquet.Page, l, r int) {
+	dict := pg.Dictionary()
+	data := pg.Data()
+	syms := data.Int32()
+	s.defs = pg.DefinitionLevels()
+
+	if s.syms == nil {
+		s.syms = make([]int32, len(s.defs))
+	} else {
+		s.syms = slices.Grow(s.syms, len(s.defs))[:len(s.defs)]
+	}
+
+	sidx := 0
+	for i := 0; i < l; i++ {
+		if s.defs[i] == 1 {
+			sidx++
+		}
+	}
+	for i := l; i < r; i++ {
+		if s.defs[i] == 1 {
+			s.syms[i] = syms[sidx]
+			sidx++
+		}
+	}
+	s.dict = dict
+}
+
 type equalConstraint struct {
 	pth string
 
@@ -392,8 +419,6 @@ func (ec *equalConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 			return nil, fmt.Errorf("unable to read page: %w", err)
 		}
 
-		symbols.Reset(pg)
-
 		// The page has the value, we need to find the matching row ranges
 		n := int(pg.NumRows())
 		bl := int(max(pfrom, from) - pfrom)
@@ -401,6 +426,7 @@ func (ec *equalConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 		var l, r int
 		switch {
 		case cidx.IsAscending() && primary:
+			symbols.Reset(pg)
 			l = sort.Search(n, func(i int) bool { return ec.comp(ec.val, symbols.Get(i)) <= 0 })
 			r = sort.Search(n, func(i int) bool { return ec.comp(ec.val, symbols.Get(i)) < 0 })
 
@@ -409,6 +435,7 @@ func (ec *equalConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 			}
 		default:
 			off, count := bl, 0
+			symbols.ResetWithRange(pg, bl, br)
 			for j := bl; j < br; j++ {
 				if !ec.matches(symbols.Get(j)) {
 					if count != 0 {
@@ -480,20 +507,25 @@ func Regex(path string, r *labels.Matcher) (Constraint, error) {
 	if r.Type != labels.MatchRegexp {
 		return nil, fmt.Errorf("unsupported matcher type: %s", r.Type)
 	}
-	return &regexConstraint{pth: path, cache: make(map[parquet.Value]bool), r: r}, nil
+	return &regexConstraint{
+		pth:   path,
+		cache: make(map[int32]bool),
+		r:     r,
+	}, nil
 }
 
 type regexConstraint struct {
 	f     storage.ParquetFileView
 	pth   string
-	cache map[parquet.Value]bool
+	cache map[int32]bool
 
 	// if its a "set" or "prefix" regex
 	// for set, those are minv and maxv of the set, for prefix minv is the prefix, maxv is prefix+max(charset)*16
 	minv parquet.Value
 	maxv parquet.Value
 
-	r *labels.Matcher
+	r            *labels.Matcher
+	matchesEmpty bool
 
 	comp func(l, r parquet.Value) int
 }
@@ -514,7 +546,7 @@ func (rc *regexConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 	if !ok {
 		// If match empty, return rr (filter nothing)
 		// otherwise return empty
-		if rc.matches(parquet.ValueOf("")) {
+		if rc.matchesEmpty {
 			return rr, nil
 		}
 		return []RowRange{}, nil
@@ -551,7 +583,7 @@ func (rc *regexConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 		}
 		// Page intersects [from, to] but we might be able to discard it with statistics
 		if cidx.NullPage(i) {
-			if rc.matches(parquet.ValueOf("")) {
+			if rc.matchesEmpty {
 				res = append(res, RowRange{pfrom, pcount})
 			}
 			continue
@@ -560,13 +592,13 @@ func (rc *regexConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 		// This works for i.e.: 'pod_name=~"thanos-.*"' or 'status_code=~"403|404"'
 		minv, maxv := cidx.MinValue(i), cidx.MaxValue(i)
 		if !rc.minv.IsNull() && !rc.maxv.IsNull() {
-			if !rc.matches(parquet.ValueOf("")) && !maxv.IsNull() && rc.comp(rc.minv, maxv) > 0 {
+			if !rc.matchesEmpty && !maxv.IsNull() && rc.comp(rc.minv, maxv) > 0 {
 				if cidx.IsDescending() {
 					break
 				}
 				continue
 			}
-			if !rc.matches(parquet.ValueOf("")) && !minv.IsNull() && rc.comp(rc.maxv, minv) < 0 {
+			if !rc.matchesEmpty && !minv.IsNull() && rc.comp(rc.maxv, minv) < 0 {
 				if cidx.IsAscending() {
 					break
 				}
@@ -614,15 +646,14 @@ func (rc *regexConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 			return nil, fmt.Errorf("unable to read page: %w", err)
 		}
 
-		symbols.Reset(pg)
-
 		// The page has the value, we need to find the matching row ranges
 		n := int(pg.NumRows())
 		bl := int(max(pfrom, from) - pfrom)
 		br := n - int(pto-min(pto, to))
 		off, count := bl, 0
+		symbols.ResetWithRange(pg, bl, br)
 		for j := bl; j < br; j++ {
-			if !rc.matches(symbols.Get(j)) {
+			if !rc.matches(symbols, symbols.GetIndex(j)) {
 				if count != 0 {
 					res = append(res, RowRange{pfrom + int64(off), int64(count)})
 				}
@@ -649,13 +680,14 @@ func (rc *regexConstraint) filter(ctx context.Context, rgIdx int, primary bool, 
 func (rc *regexConstraint) init(f storage.ParquetFileView) error {
 	c, ok := f.Schema().Lookup(rc.path())
 	rc.f = f
+	rc.matchesEmpty = rc.r.Matches("")
 	if !ok {
 		return nil
 	}
 	if stringKind := parquet.String().Type().Kind(); c.Node.Type().Kind() != stringKind {
 		return fmt.Errorf("schema: cannot search value of kind %s in column of kind %s", stringKind, c.Node.Type().Kind())
 	}
-	rc.cache = make(map[parquet.Value]bool)
+	rc.cache = make(map[int32]bool)
 	rc.comp = c.Node.Type().Compare
 
 	// if applicable compute the minv and maxv of the implied set of matches
@@ -681,11 +713,18 @@ func (rc *regexConstraint) path() string {
 	return rc.pth
 }
 
-func (rc *regexConstraint) matches(v parquet.Value) bool {
-	accept, seen := rc.cache[v]
+func (rc *regexConstraint) matches(symbols *SymbolTable, i int32) bool {
+	accept, seen := rc.cache[i]
 	if !seen {
+		var v parquet.Value
+		switch i {
+		case -1:
+			v = parquet.NullValue()
+		default:
+			v = symbols.dict.Index(i)
+		}
 		accept = rc.r.Matches(util.YoloString(v.ByteArray()))
-		rc.cache[v] = accept
+		rc.cache[i] = accept
 	}
 	return accept
 }
