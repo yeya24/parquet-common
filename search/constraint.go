@@ -621,7 +621,7 @@ func (rc *regexConstraint) path() string {
 	return rc.pth
 }
 
-func (rc *regexConstraint) matches(symbols *symbolTable, i int32) bool {
+func (rc *regexConstraint) matches(symbols *SymbolTable, i int32) bool {
 	accept, seen := rc.cache[i]
 	if !seen {
 		var v parquet.Value
