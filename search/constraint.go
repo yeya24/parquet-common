@@ -242,7 +242,7 @@ func (s *SymbolTable) Reset(pg parquet.Page) {
 	s.dict = dict
 }
 
-func (s *symbolTable) ResetWithRange(pg parquet.Page, l, r int) {
+func (s *SymbolTable) ResetWithRange(pg parquet.Page, l, r int) {
 	dict := pg.Dictionary()
 	data := pg.Data()
 	syms := data.Int32()
