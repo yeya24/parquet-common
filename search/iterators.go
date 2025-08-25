@@ -611,9 +611,12 @@ func (i *PageValueIterator) Next() bool {
 
 func (vi *PageValueIterator) Skip(n int64) int64 {
 	r := min(n, vi.p.NumRows()-int64(vi.current)-1)
+	// Move the row index cursor.
 	vi.current += int(r)
 	if vi.vr != nil {
+		// Move the page values index cursor.
 		vi.currentBufferIndex += int(r)
+		// Read more values if the current buffer is exhausted.
 		for vi.currentBufferIndex >= len(vi.buffer) {
 			vi.currentBufferIndex = vi.currentBufferIndex - len(vi.buffer)
 			num, err := vi.vr.ReadValues(vi.buffer[:cap(vi.buffer)])
