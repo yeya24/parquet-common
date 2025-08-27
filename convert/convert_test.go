@@ -114,6 +114,10 @@ func Test_Convert_TSDB(t *testing.T) {
 			require.Equal(t, st.DB.Head().NumSeries(), uint64(len(series)))
 			require.Equal(t, st.DB.Head().NumSeries(), uint64(len(chunks)))
 
+			// Verify series hash column exists and is accessible in working context
+			seriesHashIdx, ok := shard.LabelsFile().Schema().Lookup(schema.SeriesHashColumn)
+			require.True(t, ok, "series hash column should exist")
+
 			// Make sure the chunk page bounds are empty
 			for _, ci := range shard.ChunksFile().ColumnIndexes() {
 				for _, value := range append(ci.MinValues, ci.MaxValues...) {
@@ -121,12 +125,14 @@ func Test_Convert_TSDB(t *testing.T) {
 				}
 			}
 
-			colIdx, ok := shard.LabelsFile().Schema().Lookup(schema.ColIndexes)
+			colIdx, ok := shard.LabelsFile().Schema().Lookup(schema.ColIndexesColumn)
+			require.True(t, ok)
+			seriesHashIdx, ok = shard.LabelsFile().Schema().Lookup(schema.SeriesHashColumn)
 			require.True(t, ok)
 			// Make sure labels pages bounds are populated
 			for i, ci := range shard.LabelsFile().ColumnIndexes() {
 				for _, value := range append(ci.MinValues, ci.MaxValues...) {
-					if colIdx.ColumnIndex == i {
+					if colIdx.ColumnIndex == i || seriesHashIdx.ColumnIndex == i {
 						require.Empty(t, value)
 					} else {
 						require.NotEmpty(t, value)
@@ -196,8 +202,8 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 		require.Equal(t, schema.MetadataToMap(file.Metadata().KeyValueMetadata)[schema.DataColSizeMd], strconv.FormatInt(datColDuration.Milliseconds(), 10))
 	}
 
-	// 2 labels + col indexes
-	require.Len(t, shard.LabelsFile().Schema().Columns(), 3)
+	// 2 labels + col indexes + series hash
+	require.Len(t, shard.LabelsFile().Schema().Columns(), 4)
 	// 6 data cols with 10 min duration
 	require.Len(t, shard.ChunksFile().Schema().Columns(), 6)
 	series, chunks, err := readSeries(t, shard)
@@ -447,7 +453,7 @@ func rowToSeries(t *testing.T, s *parquet.Schema, dec *schema.PrometheusParquetC
 				chunksMetas[i] = append(chunksMetas[i], c...)
 			}
 
-			if col == schema.ColIndexes {
+			if col == schema.ColIndexesColumn {
 				lblIdx, err := schema.DecodeUintSlice(colVal.ByteArray())
 				if err != nil {
 					return nil, nil, err
