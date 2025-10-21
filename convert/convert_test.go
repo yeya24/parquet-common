@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/parquet-go/parquet-go"
+	"github.com/prometheus/common/promslog"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -86,7 +87,8 @@ func Test_Convert_TSDB(t *testing.T) {
 
 			app := st.Appender(ctx)
 			seriesHash := make(map[uint64]struct{})
-			for i := 0; i != 1_000; i++ {
+			totalSeries := 1200
+			for i := 0; i != totalSeries; i++ {
 				for j := 0; j < tt.numberOfSamples; j++ {
 					lbls := labels.FromStrings("__name__", "foo", "bar", fmt.Sprintf("%d", 2*i))
 					seriesHash[lbls.Hash()] = struct{}{}
@@ -96,61 +98,255 @@ func Test_Convert_TSDB(t *testing.T) {
 			}
 
 			require.NoError(t, app.Commit())
-
 			h := st.Head()
-			shards, err := ConvertTSDBBlock(ctx, bkt, h.MinTime(), h.MaxTime(), []Convertible{h}, WithColDuration(tt.dataColDuration), WithSortBy(labels.MetricName))
-			require.NoError(t, err)
-			require.Equal(t, 1, shards)
 
-			bucketOpener := storage.NewParquetBucketOpener(bkt)
-			shard, err := storage.NewParquetShardOpener(
-				ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, 0,
-			)
-			require.NoError(t, err)
-
-			require.Equal(t, len(shard.LabelsFile().RowGroups()), len(shard.ChunksFile().RowGroups()))
-			series, chunks, err := readSeries(t, shard)
-			require.NoError(t, err)
-			require.Equal(t, st.DB.Head().NumSeries(), uint64(len(series)))
-			require.Equal(t, st.DB.Head().NumSeries(), uint64(len(chunks)))
-
-			// Verify series hash column exists and is accessible in working context
-			seriesHashIdx, ok := shard.LabelsFile().Schema().Lookup(schema.SeriesHashColumn)
-			require.True(t, ok, "series hash column should exist")
-
-			// Make sure the chunk page bounds are empty
-			for _, ci := range shard.ChunksFile().ColumnIndexes() {
-				for _, value := range append(ci.MinValues, ci.MaxValues...) {
-					require.Empty(t, value)
-				}
+			opts := []ConvertOption{
+				WithSortBy(labels.MetricName, "bar"),
+				WithColDuration(tt.dataColDuration),
+				WithNumRowGroups(4),
+				WithRowGroupSize(100),
+				WithReadConcurrency(4),
+				WithWriteConcurrency(2),
+			}
+			// build equivalent config for ease of assertion with methods that take cfg
+			cfg := DefaultConvertOpts
+			for _, opt := range opts {
+				opt(&cfg)
 			}
 
-			colIdx, ok := shard.LabelsFile().Schema().Lookup(schema.ColIndexesColumn)
-			require.True(t, ok)
-			seriesHashIdx, ok = shard.LabelsFile().Schema().Lookup(schema.SeriesHashColumn)
-			require.True(t, ok)
-			// Make sure labels pages bounds are populated
-			for i, ci := range shard.LabelsFile().ColumnIndexes() {
-				for _, value := range append(ci.MinValues, ci.MaxValues...) {
-					if colIdx.ColumnIndex == i || seriesHashIdx.ColumnIndex == i {
+			shardCount, err := ConvertTSDBBlock(
+				ctx, bkt,
+				h.MinTime(), h.MaxTime(), []Convertible{h},
+				promslog.NewNopLogger(),
+				opts...,
+			)
+			require.NoError(t, err)
+			require.Equal(t, 3, shardCount) // 1200 series; 3 shards of 4 row groups of 100 rows
+
+			bucketOpener := storage.NewParquetBucketOpener(bkt)
+
+			remainingRows := totalSeries
+			allSeries := make([]labels.Labels, 0, totalSeries)
+			for shardIdx := range shardCount {
+				shard, err := storage.NewParquetShardOpener(
+					ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, shardIdx,
+				)
+				require.NoError(t, err)
+
+				require.Equal(t, len(shard.LabelsFile().RowGroups()), len(shard.ChunksFile().RowGroups()))
+				series, chunks, err := readSeries(t, shard)
+				require.NoError(t, err)
+
+				if shardIdx < shardCount-1 {
+					require.Equal(t, cfg.numRowGroups*cfg.rowGroupSize, len(series))
+					require.Equal(t, cfg.numRowGroups*cfg.rowGroupSize, len(chunks))
+				} else {
+					require.Equal(t, remainingRows, len(series))
+					require.Equal(t, remainingRows, len(chunks))
+				}
+
+				// Verify series hash column exists and is accessible in working context
+				seriesHashIdx, ok := shard.LabelsFile().Schema().Lookup(schema.SeriesHashColumn)
+				require.True(t, ok, "series hash column should exist")
+
+				// Make sure the chunk page bounds are empty
+				for _, ci := range shard.ChunksFile().ColumnIndexes() {
+					for _, value := range append(ci.MinValues, ci.MaxValues...) {
 						require.Empty(t, value)
-					} else {
-						require.NotEmpty(t, value)
+					}
+				}
+
+				colIdx, ok := shard.LabelsFile().Schema().Lookup(schema.ColIndexesColumn)
+				require.True(t, ok)
+				seriesHashIdx, ok = shard.LabelsFile().Schema().Lookup(schema.SeriesHashColumn)
+				require.True(t, ok)
+				// Make sure labels pages bounds are populated with index data
+				for i, ci := range shard.LabelsFile().ColumnIndexes() {
+					for _, value := range append(ci.MinValues, ci.MaxValues...) {
+						if i%cfg.numRowGroups == colIdx.ColumnIndex || i%cfg.numRowGroups == seriesHashIdx.ColumnIndex {
+							require.Empty(t, value)
+						} else {
+							require.NotEmpty(t, value)
+						}
+					}
+				}
+
+				for i, s := range series {
+					require.Contains(t, seriesHash, s.Hash())
+					require.Len(t, chunks[i], tt.expectedNumberOfChunks)
+					totalSamples := 0
+					for _, c := range chunks[i] {
+						require.Equal(t, tt.expectedPointsPerChunk, c.Chunk.NumSamples())
+						totalSamples += c.Chunk.NumSamples()
+					}
+					require.Equal(t, tt.numberOfSamples, totalSamples)
+				}
+				allSeries = append(allSeries, series...)
+				remainingRows -= len(series)
+			}
+
+			// make sure the series are sorted
+			for i := 0; i < len(allSeries)-1; i++ {
+				require.LessOrEqual(t, allSeries[i].Get(labels.MetricName), allSeries[i+1].Get(labels.MetricName))
+				if allSeries[i].Get(labels.MetricName) == allSeries[i+1].Get(labels.MetricName) {
+					require.LessOrEqual(t, allSeries[i].Get("bar"), allSeries[i+1].Get("bar"))
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkConvertTSDBParallel(b *testing.B) {
+	ctx := context.Background()
+
+	testCases := []struct {
+		shards                int
+		shardWriteParallelism int
+	}{
+		// first set of cases convert shards serially (write parallelism = 1)
+		{
+			shards:                1,
+			shardWriteParallelism: 1,
+		},
+		{
+			shards:                2,
+			shardWriteParallelism: 1,
+		},
+		{
+			shards:                4,
+			shardWriteParallelism: 1,
+		},
+		{
+			shards:                8,
+			shardWriteParallelism: 1,
+		},
+		// remaining parallel cases seek to increase parallelism to reduce conversion time
+		// and demonstrate diminishing returns as CPU cores become saturated.
+		{
+			shards:                2,
+			shardWriteParallelism: 2,
+		},
+		{
+			shards:                4,
+			shardWriteParallelism: 2,
+		},
+		{
+			shards:                4,
+			shardWriteParallelism: 4,
+		},
+		{
+			shards:                8,
+			shardWriteParallelism: 2,
+		},
+		{
+			shards:                8,
+			shardWriteParallelism: 4,
+		},
+		{
+			shards:                8,
+			shardWriteParallelism: 8,
+		},
+	}
+
+	st := teststorage.New(b)
+	b.Cleanup(func() { _ = st.Close() })
+
+	bkt, err := filesystem.NewBucket(b.TempDir())
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = bkt.Close() })
+
+	// 100,000 series
+	metrics := 50
+	instances := 2
+	regions := 4
+	zones := 2
+	services := 25
+	environments := 5
+
+	numSeries := metrics * instances * regions * zones * services * environments
+	b.Logf("Generating %d series (%d metrics × %d instances × %d regions × %d zones × %d services × %d environments)",
+		numSeries, metrics, instances, regions, zones, services, environments)
+
+	step := 15 * time.Second
+	blockDuration := 2 * time.Hour
+	numSamples := int(blockDuration / step)
+
+	app := st.Appender(ctx)
+	for metric := range metrics {
+		for instance := range instances {
+			for region := range regions {
+				for zone := range zones {
+					for service := range services {
+						for env := range environments {
+							lbls := labels.FromStrings(
+								"__name__", fmt.Sprintf("test_metric_%d", metric),
+								"instance", fmt.Sprintf("instance-%d", instance),
+								"region", fmt.Sprintf("region-%d", region),
+								"zone", fmt.Sprintf("zone-%d", zone),
+								"service", fmt.Sprintf("service-%d", service),
+								"environment", fmt.Sprintf("environment-%d", env),
+							)
+							for sample := range numSamples {
+								_, err := app.Append(0, lbls, (step * time.Duration(sample)).Milliseconds(), float64(instance))
+								require.NoError(b, err)
+							}
+						}
 					}
 				}
 			}
+		}
+	}
+	require.NoError(b, app.Commit())
 
-			for i, s := range series {
-				require.Contains(t, seriesHash, s.Hash())
-				require.Len(t, chunks[i], tt.expectedNumberOfChunks)
-				totalSamples := 0
-				for _, c := range chunks[i] {
-					require.Equal(t, tt.expectedPointsPerChunk, c.Chunk.NumSamples())
-					totalSamples += c.Chunk.NumSamples()
+	for _, tc := range testCases {
+		for _, readParallelismPerWrite := range []int{8, 16, 24, 32} {
+			tcName := fmt.Sprintf(
+				"shards=%d/writeParallelism=%d/readParallelismPerWrite=%d",
+				tc.shards, tc.shardWriteParallelism, readParallelismPerWrite,
+			)
+			b.Run(tcName, func(b *testing.B) {
+				h := st.Head()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					// Input block size is constant;
+					// to easily target the varying shard counts for the test cases.
+					// hold max row groups constant and calculate row group sizes.
+					const numRowGroups = 4
+					opts := []ConvertOption{
+						WithSortBy(labels.MetricName),
+						WithNumRowGroups(numRowGroups),
+						WithWriteConcurrency(tc.shardWriteParallelism),
+						// Read concurrency is per-shardWriter;
+						// With a 16-core or 32-core dev machine and test cases up to 8 shards written in parallel
+						// 4 readers per writer allows benchmark to show diminishing returns as CPU cores become saturated.
+						// A 4:1 ratio of reader to writer concurrency minimizes total conversion time in this benchmark.
+						WithReadConcurrency(readParallelismPerWrite),
+					}
+
+					// Calculate row group size limit to target shard count for the test case.
+					shardRows := (numSeries + tc.shards - 1) / tc.shards
+					rowGroupSize := (shardRows + numRowGroups - 1) / numRowGroups
+					opts = append(opts, WithRowGroupSize(rowGroupSize))
+
+					var outputShards int
+					var err error
+
+					start := time.Now()
+					outputShards, err = ConvertTSDBBlock(
+						ctx, bkt,
+						h.MinTime(), h.MaxTime(), []Convertible{h},
+						promslog.NewNopLogger(),
+						opts...,
+					)
+
+					require.NoError(b, err)
+					dur := time.Since(start)
+					b.ReportMetric(float64(dur.Nanoseconds()/int64(b.N)), "conversion-ns/op")
+					require.Equal(b, tc.shards, outputShards)
 				}
-				require.Equal(t, tt.numberOfSamples, totalSamples)
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -181,6 +377,7 @@ func Test_CreateParquetWithReducedTimestampSamples(t *testing.T) {
 	shards, err := ConvertTSDBBlock(
 		ctx, bkt, mint, maxt,
 		[]Convertible{h},
+		promslog.NewNopLogger(),
 		WithColDuration(datColDuration),
 		WithSortBy(labels.MetricName),
 		WithColumnPageBuffers(parquet.NewFileBufferPool(t.TempDir(), "buffers.*")),
@@ -273,6 +470,7 @@ func Test_BlockHasOnlySomeSeriesInConvertTime(t *testing.T) {
 		10,
 		20-1,
 		[]Convertible{h},
+		promslog.NewNopLogger(),
 		WithColDuration(time.Millisecond*10),
 		WithColumnPageBuffers(parquet.NewFileBufferPool(t.TempDir(), "buffers.*")),
 	)
@@ -343,51 +541,71 @@ func Test_SortedLabels(t *testing.T) {
 		totalSeries++
 	}
 
+	require.Equal(t, totalSeries, 2640)
+	numRowGroups := 1
+	rowGroupSize := 1000
+	expectedShardCount := (totalSeries + (numRowGroups * rowGroupSize) - 1) / (numRowGroups * rowGroupSize)
+	expectedRowsPerShard := (totalSeries + expectedShardCount - 1) / expectedShardCount
+
 	// lets sort first by `zzz` as its not the default sorting on TSDB
-	shards, err := ConvertTSDBBlock(
+	shardCount, err := ConvertTSDBBlock(
 		ctx,
 		bkt,
 		0,
 		time.Minute.Milliseconds(),
 		heads,
+		promslog.NewNopLogger(),
 		WithColDuration(time.Minute*10),
 		WithSortBy("zzz", labels.MetricName),
 		WithColumnPageBuffers(parquet.NewFileBufferPool(t.TempDir(), "buffers.*")),
+		WithNumRowGroups(numRowGroups),
+		WithRowGroupSize(rowGroupSize),
 	)
 	require.NoError(t, err)
-	require.Equal(t, 1, shards)
+	require.Equal(t, expectedShardCount, shardCount)
 
-	bucketOpener := storage.NewParquetBucketOpener(bkt)
-	shard, err := storage.NewParquetShardOpener(
-		ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, 0,
-	)
-	require.NoError(t, err)
+	remainingRows := totalSeries
+	for i := range shardCount {
+		bucketOpener := storage.NewParquetBucketOpener(bkt)
+		shard, err := storage.NewParquetShardOpener(
+			ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, i,
+		)
+		require.NoError(t, err)
 
-	series, chunks, err := readSeries(t, shard)
-	require.NoError(t, err)
-	require.Equal(t, len(series), totalSeries, "series count mismatch")
-
-	for i := 0; i < len(series)-1; i++ {
-		require.LessOrEqual(t, series[i].Get("zzz"), series[i+1].Get("zzz"))
-		if series[i].Get("zzz") == series[i+1].Get("zzz") {
-			require.LessOrEqual(t, series[i].Get(labels.MetricName), series[i+1].Get(labels.MetricName))
+		series, chunks, err := readSeries(t, shard)
+		require.NoError(t, err)
+		if i < shardCount-1 {
+			require.Equal(t, expectedRowsPerShard, len(series))
+			require.Equal(t, expectedRowsPerShard, len(chunks))
+		} else {
+			require.Equal(t, remainingRows, len(series))
+			require.Equal(t, remainingRows, len(chunks))
 		}
-		require.Len(t, chunks[i], 1)
-		st := chunks[i][0].Chunk.Iterator(nil)
-		expectedSamples := 1
-		if series[i].Get("type") == "duplicated" {
-			expectedSamples++
+		remainingRows -= len(series)
+
+		for i := 0; i < len(series)-1; i++ {
+			require.LessOrEqual(t, series[i].Get("zzz"), series[i+1].Get("zzz"))
+			if series[i].Get("zzz") == series[i+1].Get("zzz") {
+				require.LessOrEqual(t, series[i].Get(labels.MetricName), series[i+1].Get(labels.MetricName))
+			}
+			require.Len(t, chunks[i], 1)
+			st := chunks[i][0].Chunk.Iterator(nil)
+			expectedSamples := 1
+			if series[i].Get("type") == "duplicated" {
+				expectedSamples++
+			}
+			totalSamples := 0
+
+			for st.Next() != chunkenc.ValNone {
+				totalSamples++
+			}
+
+			require.Equal(t, expectedSamples, totalSamples, "series", series[i])
+
+			require.NoError(t, st.Err())
 		}
-		totalSamples := 0
-
-		for st.Next() != chunkenc.ValNone {
-			totalSamples++
-		}
-
-		require.Equal(t, expectedSamples, totalSamples, "series", series[i])
-
-		require.NoError(t, st.Err())
 	}
+	require.Equal(t, 0, remainingRows)
 }
 
 func Test_WithBloomFilterLabels(t *testing.T) {
