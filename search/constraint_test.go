@@ -536,6 +536,10 @@ func (m *mockConstraint) filter(ctx context.Context, rgIdx int, primary bool, rr
 	return rr, nil
 }
 
+func (m *mockConstraint) prefilter(rgIdx int, rr []RowRange) ([]RowRange, error) {
+	return rr, nil
+}
+
 type mockSortingColumn struct {
 	pathName string
 }
