@@ -904,36 +904,36 @@ func Test_TooManyColumns(t *testing.T) {
 			name:             "with_numRowGroups_2_shards",
 			withNumRowGroups: true,
 			description:      "Uses shardedTSDBRowReaders path when numRowGroups is set, creates 2 shards",
-			maxNumColumns:    100, // 98 label columns + 2 system columns
-			uniqueLabelNames: 150, // Exceeds maxNumColumns to trigger sharding
-			labelsPerSeries:  50,  // Each series will have 50 unique labels (plus __name__)
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 30, // Exceeds maxNumColumns to trigger sharding
+			labelsPerSeries:  10, // Each series will have 10 unique labels (plus __name__)
 			minShards:        2,
 		},
 		{
 			name:             "without_numRowGroups_2_shards",
 			withNumRowGroups: false,
 			description:      "Uses singleTSDBRowReader path when numRowGroups is not set, creates 2 shards",
-			maxNumColumns:    100, // 98 label columns + 2 system columns
-			uniqueLabelNames: 150, // Exceeds maxNumColumns to trigger sharding
-			labelsPerSeries:  50,  // Each series will have 50 unique labels (plus __name__)
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 30, // Exceeds maxNumColumns to trigger sharding
+			labelsPerSeries:  10, // Each series will have 10 unique labels (plus __name__)
 			minShards:        2,
 		},
 		{
 			name:             "with_numRowGroups_3_shards",
 			withNumRowGroups: true,
 			description:      "Uses shardedTSDBRowReaders path when numRowGroups is set, creates 3+ shards",
-			maxNumColumns:    100, // 98 label columns + 2 system columns
-			uniqueLabelNames: 250, // Will require at least 3 shards (250 / 98 ≈ 2.55)
-			labelsPerSeries:  80,  // Each series will have 80 unique labels (plus __name__)
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 50, // Will require at least 3 shards (50 / 18 ≈ 2.78)
+			labelsPerSeries:  15, // Each series will have 15 unique labels (plus __name__)
 			minShards:        3,
 		},
 		{
 			name:             "without_numRowGroups_3_shards",
 			withNumRowGroups: false,
 			description:      "Uses singleTSDBRowReader path when numRowGroups is not set, creates 3+ shards",
-			maxNumColumns:    100, // 98 label columns + 2 system columns
-			uniqueLabelNames: 250, // Will require at least 3 shards (250 / 98 ≈ 2.55)
-			labelsPerSeries:  80,  // Each series will have 80 unique labels (plus __name__)
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 50, // Will require at least 3 shards (50 / 18 ≈ 2.78)
+			labelsPerSeries:  15, // Each series will have 15 unique labels (plus __name__)
 			minShards:        3,
 		},
 	}
