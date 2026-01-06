@@ -904,36 +904,36 @@ func Test_TooManyColumns(t *testing.T) {
 			name:             "with_numRowGroups_2_shards",
 			withNumRowGroups: true,
 			description:      "Uses shardedTSDBRowReaders path when numRowGroups is set, creates 2 shards",
-			maxNumColumns:    1000, // 998 label columns + 2 system columns
-			uniqueLabelNames: 1200, // Exceeds maxNumColumns to trigger sharding
-			labelsPerSeries:  200,  // Each series will have 200 unique labels (plus __name__)
+			maxNumColumns:    100, // 98 label columns + 2 system columns
+			uniqueLabelNames: 150, // Exceeds maxNumColumns to trigger sharding
+			labelsPerSeries:  50,  // Each series will have 50 unique labels (plus __name__)
 			minShards:        2,
 		},
 		{
 			name:             "without_numRowGroups_2_shards",
 			withNumRowGroups: false,
 			description:      "Uses singleTSDBRowReader path when numRowGroups is not set, creates 2 shards",
-			maxNumColumns:    1000, // 998 label columns + 2 system columns
-			uniqueLabelNames: 1200, // Exceeds maxNumColumns to trigger sharding
-			labelsPerSeries:  200,  // Each series will have 200 unique labels (plus __name__)
+			maxNumColumns:    100, // 98 label columns + 2 system columns
+			uniqueLabelNames: 150, // Exceeds maxNumColumns to trigger sharding
+			labelsPerSeries:  50,  // Each series will have 50 unique labels (plus __name__)
 			minShards:        2,
 		},
 		{
 			name:             "with_numRowGroups_3_shards",
 			withNumRowGroups: true,
 			description:      "Uses shardedTSDBRowReaders path when numRowGroups is set, creates 3+ shards",
-			maxNumColumns:    1000, // 998 label columns + 2 system columns
-			uniqueLabelNames: 2500, // Will require at least 3 shards (2500 / 998 ≈ 2.5)
-			labelsPerSeries:  300,  // Each series will have 300 unique labels (plus __name__)
+			maxNumColumns:    100, // 98 label columns + 2 system columns
+			uniqueLabelNames: 250, // Will require at least 3 shards (250 / 98 ≈ 2.55)
+			labelsPerSeries:  80,  // Each series will have 80 unique labels (plus __name__)
 			minShards:        3,
 		},
 		{
 			name:             "without_numRowGroups_3_shards",
 			withNumRowGroups: false,
 			description:      "Uses singleTSDBRowReader path when numRowGroups is not set, creates 3+ shards",
-			maxNumColumns:    1000, // 998 label columns + 2 system columns
-			uniqueLabelNames: 2500, // Will require at least 3 shards (2500 / 998 ≈ 2.5)
-			labelsPerSeries:  300,  // Each series will have 300 unique labels (plus __name__)
+			maxNumColumns:    100, // 98 label columns + 2 system columns
+			uniqueLabelNames: 250, // Will require at least 3 shards (250 / 98 ≈ 2.55)
+			labelsPerSeries:  80,  // Each series will have 80 unique labels (plus __name__)
 			minShards:        3,
 		},
 	}
@@ -1038,8 +1038,18 @@ func rowToSeries(t *testing.T, s *parquet.Schema, dec *schema.PrometheusParquetC
 			col := cols[colIdx][0]
 			label, ok := schema.ExtractLabelFromColumn(col)
 			if ok {
+				// Only include label columns that have actual values (not null/empty)
+				// This matches what's stored in s_col_indexes - only labels present in the series
+				if colVal.IsNull() {
+					continue
+				}
 				b.Add(label, colVal.String())
-				foundLblsIdxs = append(foundLblsIdxs, colIdx)
+				// Look up the ColumnIndex from the schema (same as when writing)
+				lc, ok := s.Lookup(col)
+				if !ok {
+					return nil, nil, fmt.Errorf("column %s not found in schema", col)
+				}
+				foundLblsIdxs = append(foundLblsIdxs, lc.ColumnIndex)
 			}
 
 			if schema.IsDataColumn(col) && dec != nil {

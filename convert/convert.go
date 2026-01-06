@@ -55,7 +55,7 @@ var DefaultConvertOpts = convertOpts{
 	readConcurrency:    runtime.GOMAXPROCS(0),
 	writeConcurrency:   1,
 	maxSamplesPerChunk: tsdb.DefaultSamplesPerChunk,
-	maxNumColumns:      parquet.MaxColumnIndex, // 32767 - max column index supported by parquet-go
+	maxNumColumns:      parquet.MaxColumnIndex, // max column index supported by parquet-go
 }
 
 type Convertible interface {
@@ -283,7 +283,7 @@ func WithMaxSamplesPerChunk(samplesPerChunk int) ConvertOption {
 }
 
 // WithMaxNumColumns sets the maximum number of columns allowed in a Parquet file.
-// Parquet has a limit of approximately 32767 columns (MaxInt16). When this limit is exceeded,
+// Parquet-go library has a limit of max column index supported. When this limit is exceeded,
 // the conversion will automatically shard the data into multiple files. This option allows
 // users to control the number of columns in the converted parquet file.
 //
@@ -292,7 +292,7 @@ func WithMaxSamplesPerChunk(samplesPerChunk int) ConvertOption {
 // 998 unique label names can be included in a single shard.
 //
 // Parameters:
-//   - maxColumns: Maximum number of columns per Parquet file, including system columns (default: 32767)
+//   - maxColumns: Maximum number of columns per Parquet file, including system columns
 //
 // Example:
 //
@@ -492,7 +492,8 @@ func singleTSDBRowReader(
 	}
 
 	// If total unique label names exceed the limit, we need to shard based only on column limits.
-	if len(allLabelNames)+systemColumns >= opts.maxNumColumns {
+	// Equality is allowed (exactly maxNumColumns columns is fine).
+	if len(allLabelNames)+systemColumns > opts.maxNumColumns {
 		indexReaders := make([]blockIndexReader, len(blocks))
 		defer func() {
 			for _, indexReader := range indexReaders {
@@ -808,12 +809,12 @@ func shardSeries(
 
 			// Create a new shard if:
 			// 1. Row-based sharding is enabled AND the row limit is reached, OR
-			// 2. Adding this series would exceed the column limit
+			// 2. Adding this series would exceed the column limit (equality is allowed)
 			shouldCreateNewShard := false
 			if opts.numRowGroups != math.MaxInt32 && uniqueCount >= rowsPerShard {
 				shouldCreateNewShard = true
 			}
-			if len(labelColumns)+newLabelCount+systemColumns >= opts.maxNumColumns {
+			if len(labelColumns)+newLabelCount+systemColumns > opts.maxNumColumns {
 				shouldCreateNewShard = true
 			}
 
