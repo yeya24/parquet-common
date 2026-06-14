@@ -802,6 +802,174 @@ func Test_TooManyColumnsPanic(t *testing.T) {
 	})
 }
 
+// createHighCardinalityTestData creates TSDB test data with high cardinality label names.
+// Each unique label name becomes a column in the Parquet file, plus system columns.
+// Returns the storage, head block pointer, and the number of unique label names created.
+// The caller is responsible for cleaning up the storage.
+func createHighCardinalityTestData(t *testing.T, uniqueLabelNames, labelsPerSeries int) (*teststorage.TestStorage, *tsdb.Head, int) {
+	ctx := context.Background()
+	st := teststorage.New(t)
+
+	app := st.Appender(ctx)
+	labelNameCounter := 0
+
+	// Create series with high cardinality label names
+	// Each series gets unique label names, ensuring we have many unique label names total
+	// We'll create enough series to exceed the column limit
+	numSeries := (uniqueLabelNames + labelsPerSeries - 1) / labelsPerSeries
+	for seriesIdx := 0; seriesIdx < numSeries && labelNameCounter < uniqueLabelNames; seriesIdx++ {
+		// Create labels for this series
+		seriesLabels := make([]string, 0, labelsPerSeries*2+2)
+		seriesLabels = append(seriesLabels, labels.MetricName, fmt.Sprintf("metric_%d", seriesIdx))
+
+		// Add unique label names to this series
+		for i := 0; i < labelsPerSeries && labelNameCounter < uniqueLabelNames; i++ {
+			labelName := fmt.Sprintf("high_cardinality_label_%d", labelNameCounter)
+			seriesLabels = append(seriesLabels, labelName, fmt.Sprintf("value_%d", seriesIdx))
+			labelNameCounter++
+		}
+
+		// Append a sample for this series
+		_, err := app.Append(0, labels.FromStrings(seriesLabels...), int64(seriesIdx), float64(seriesIdx))
+		require.NoError(t, err)
+
+		// Commit periodically to avoid memory issues
+		if seriesIdx%1000 == 0 && seriesIdx > 0 {
+			require.NoError(t, app.Commit())
+			app = st.Appender(ctx)
+		}
+	}
+
+	require.NoError(t, app.Commit())
+	require.GreaterOrEqual(t, labelNameCounter, uniqueLabelNames, "Should have created enough unique label names")
+	t.Logf("Created %d unique label names (target: %d)", labelNameCounter, uniqueLabelNames)
+
+	h := st.Head()
+
+	// Verify we actually have the unique label names in the TSDB block
+	indexr, err := h.Index()
+	require.NoError(t, err)
+	defer func() {
+		_ = indexr.Close()
+	}()
+	labelNames, err := indexr.LabelNames(ctx)
+	require.NoError(t, err)
+	// __name__ is always present, so we expect at least labelNameCounter + 1 unique label names
+	t.Logf("TSDB block has %d unique label names", len(labelNames))
+	require.GreaterOrEqual(t, len(labelNames), uniqueLabelNames, "TSDB block should have at least the expected number of unique label names")
+
+	return st, h, labelNameCounter
+}
+
+// verifyShardsWithLimit verifies that all shards are valid and don't exceed the specified column limit.
+func verifyShardsWithLimit(t *testing.T, ctx context.Context, bkt *filesystem.Bucket, shardCount int, maxNumColumns int) {
+	bucketOpener := storage.NewParquetBucketOpener(bkt)
+
+	for shardIdx := range shardCount {
+		shard, err := storage.NewParquetShardOpener(
+			ctx, DefaultConvertOpts.name, bucketOpener, bucketOpener, shardIdx,
+		)
+		require.NoError(t, err)
+
+		labelColumns := shard.LabelsFile().Schema().Columns()
+		totalColumns := len(labelColumns)
+
+		// Verify the shard doesn't exceed the column limit
+		require.LessOrEqual(t, totalColumns, maxNumColumns,
+			"Shard %d should not exceed Parquet column limit of %d", shardIdx, maxNumColumns)
+
+		// Verify we can read from the shard
+		series, chunks, err := readSeries(t, shard)
+		require.NoError(t, err)
+		require.NotEmpty(t, series, "Shard %d should contain series", shardIdx)
+		require.Equal(t, len(series), len(chunks), "Shard %d should have matching series and chunks", shardIdx)
+	}
+}
+
+// Test_TooManyColumns verifies that conversion correctly shards based on column limits
+// both when numRowGroups is set and when it's not.
+func Test_TooManyColumns(t *testing.T) {
+	ctx := context.Background()
+
+	tc := []struct {
+		name             string
+		withNumRowGroups bool
+		description      string
+		maxNumColumns    int // Maximum columns per shard (includes 2 system columns)
+		uniqueLabelNames int // Total unique label names to create
+		labelsPerSeries  int // Number of unique labels per series
+		minShards        int // Minimum expected number of shards
+	}{
+		{
+			name:             "with_numRowGroups_2_shards",
+			withNumRowGroups: true,
+			description:      "Uses shardedTSDBRowReaders path when numRowGroups is set, creates 2 shards",
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 30, // Exceeds maxNumColumns to trigger sharding
+			labelsPerSeries:  10, // Each series will have 10 unique labels (plus __name__)
+			minShards:        2,
+		},
+		{
+			name:             "without_numRowGroups_2_shards",
+			withNumRowGroups: false,
+			description:      "Uses singleTSDBRowReader path when numRowGroups is not set, creates 2 shards",
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 30, // Exceeds maxNumColumns to trigger sharding
+			labelsPerSeries:  10, // Each series will have 10 unique labels (plus __name__)
+			minShards:        2,
+		},
+		{
+			name:             "with_numRowGroups_3_shards",
+			withNumRowGroups: true,
+			description:      "Uses shardedTSDBRowReaders path when numRowGroups is set, creates 3+ shards",
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 50, // Will require at least 3 shards (50 / 18 ≈ 2.78)
+			labelsPerSeries:  15, // Each series will have 15 unique labels (plus __name__)
+			minShards:        3,
+		},
+		{
+			name:             "without_numRowGroups_3_shards",
+			withNumRowGroups: false,
+			description:      "Uses singleTSDBRowReader path when numRowGroups is not set, creates 3+ shards",
+			maxNumColumns:    20, // 18 label columns + 2 system columns
+			uniqueLabelNames: 50, // Will require at least 3 shards (50 / 18 ≈ 2.78)
+			labelsPerSeries:  15, // Each series will have 15 unique labels (plus __name__)
+			minShards:        3,
+		},
+	}
+
+	for _, tt := range tc {
+		t.Run(tt.name, func(t *testing.T) {
+			bkt, err := filesystem.NewBucket(t.TempDir())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = bkt.Close() })
+
+			st, h, _ := createHighCardinalityTestData(t, tt.uniqueLabelNames, tt.labelsPerSeries)
+			t.Cleanup(func() { _ = st.Close() })
+
+			opts := []ConvertOption{
+				WithMaxNumColumns(tt.maxNumColumns),
+			}
+			if tt.withNumRowGroups {
+				opts = append(opts, WithNumRowGroups(4), WithRowGroupSize(1000))
+			}
+
+			shardCount, err := ConvertTSDBBlock(
+				ctx, bkt,
+				h.MinTime(), h.MaxTime(),
+				[]Convertible{h},
+				promslog.NewNopLogger(),
+				opts...,
+			)
+			require.NoError(t, err, "Conversion should succeed by creating multiple shards: %s", tt.description)
+			require.GreaterOrEqual(t, shardCount, tt.minShards, "Should create at least %d shards when exceeding column limit: %s", tt.minShards, tt.description)
+
+			// Verify each shard is valid and doesn't exceed the column limit
+			verifyShardsWithLimit(t, ctx, bkt, shardCount, tt.maxNumColumns)
+		})
+	}
+}
+
 func Test_WithBloomFilterLabels(t *testing.T) {
 	opts := DefaultConvertOpts
 
@@ -870,8 +1038,18 @@ func rowToSeries(t *testing.T, s *parquet.Schema, dec *schema.PrometheusParquetC
 			col := cols[colIdx][0]
 			label, ok := schema.ExtractLabelFromColumn(col)
 			if ok {
+				// Only include label columns that have actual values (not null/empty)
+				// This matches what's stored in s_col_indexes - only labels present in the series
+				if colVal.IsNull() {
+					continue
+				}
 				b.Add(label, colVal.String())
-				foundLblsIdxs = append(foundLblsIdxs, colIdx)
+				// Look up the ColumnIndex from the schema (same as when writing)
+				lc, ok := s.Lookup(col)
+				if !ok {
+					return nil, nil, fmt.Errorf("column %s not found in schema", col)
+				}
+				foundLblsIdxs = append(foundLblsIdxs, lc.ColumnIndex)
 			}
 
 			if schema.IsDataColumn(col) && dec != nil {
